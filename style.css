@@ -1,0 +1,130 @@
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  color: #1a1a1a;
+}
+
+body {
+  display: flex;
+}
+
+#sidebar {
+  width: 320px;
+  flex: 0 0 320px;
+  padding: 20px;
+  background: #f7f7f8;
+  border-right: 1px solid #d9d9dc;
+  overflow-y: auto;
+  height: 100vh;
+}
+
+#sidebar h1 {
+  font-size: 20px;
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+
+#sidebar .intro {
+  font-size: 13px;
+  color: #555;
+  margin: 0 0 20px;
+}
+
+.field {
+  margin-bottom: 14px;
+}
+
+.field label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.field input {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 14px;
+  border: 1px solid #c9c9cf;
+  border-radius: 4px;
+  background: white;
+}
+
+.field small {
+  display: block;
+  color: #777;
+  font-size: 11px;
+  margin-top: 3px;
+}
+
+.readout {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  color: #333;
+  padding: 8px 10px;
+  background: #ececee;
+  border-radius: 4px;
+}
+
+button {
+  width: 100%;
+  padding: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+
+#compute {
+  background: #0a7e8c;
+  color: white;
+}
+
+#compute:hover { background: #0b95a4; }
+#compute:disabled { background: #888; cursor: wait; }
+
+button.secondary {
+  background: transparent;
+  color: #555;
+  border: 1px solid #c9c9cf;
+}
+
+button.secondary:hover { background: #ececee; }
+
+.status {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #555;
+  min-height: 18px;
+}
+
+#sidebar footer {
+  margin-top: 30px;
+  font-size: 11px;
+  color: #888;
+  line-height: 1.4;
+  border-top: 1px solid #ddd;
+  padding-top: 12px;
+}
+
+#sidebar footer p { margin: 0 0 6px; }
+
+#map {
+  flex: 1;
+  height: 100vh;
+}
+
+@media (max-width: 700px) {
+  body { flex-direction: column; }
+  #sidebar { width: 100%; flex: 0 0 auto; height: auto; border-right: none; border-bottom: 1px solid #d9d9dc; }
+  #map { height: 60vh; }
+}

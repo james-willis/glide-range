@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>glide-range — wind &amp; terrain aware paraglider reach</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <aside id="sidebar">
+    <h1>glide-range</h1>
+    <p class="intro">Click the map to place a launch pin, then enter your parameters.</p>
+
+    <div class="field">
+      <label>Pin</label>
+      <div id="coords" class="readout">(not set — click map)</div>
+    </div>
+
+    <div class="field">
+      <label for="height">Height above ground (m)</label>
+      <input id="height" type="number" value="800" min="0" step="50" />
+    </div>
+
+    <div class="field">
+      <label for="gr">Glide ratio (still air)</label>
+      <input id="gr" type="number" value="9" min="1" step="0.5" />
+    </div>
+
+    <div class="field">
+      <label for="airspeed">Airspeed, trim (km/h)</label>
+      <input id="airspeed" type="number" value="36" min="10" step="1" />
+    </div>
+
+    <div class="field">
+      <label for="windSpeed">Wind speed (km/h)</label>
+      <input id="windSpeed" type="number" value="15" min="0" step="1" />
+    </div>
+
+    <div class="field">
+      <label for="windDir">Wind direction (° from)</label>
+      <input id="windDir" type="number" value="270" min="0" max="360" step="5" />
+      <small>Meteorological: 0 = N, 90 = E, 180 = S, 270 = W</small>
+    </div>
+
+    <button id="compute">Compute glide range</button>
+    <button id="clear" class="secondary">Clear</button>
+
+    <div id="status" class="status"></div>
+
+    <footer>
+      <p>Base map &amp; terrain: © OpenStreetMap contributors, © OpenTopoMap (CC-BY-SA), SRTM.</p>
+      <p>Elevation: AWS Terrain Tiles (~30 m). This is a rough estimator — real flight planning needs real tools.</p>
+    </footer>
+  </aside>
+
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>
