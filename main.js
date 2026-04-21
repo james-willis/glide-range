@@ -23,8 +23,8 @@ const map = new maplibregl.Map({
     },
     layers: [{ id: 'otm', type: 'raster', source: 'otm' }],
   },
-  center: [7.8632, 46.5333], // Interlaken — paragliding mecca
-  zoom: 11,
+  center: [-122.0306, 47.5133], // Chirico LZ, Tiger Mountain (Poo Poo Point)
+  zoom: 13,
 });
 
 map.addControl(new maplibregl.NavigationControl(), 'top-right');
@@ -45,9 +45,11 @@ function setPin(lngLat) {
   pinMarker.on('dragend', () => {
     pinLngLat = pinMarker.getLngLat();
     refreshPinReadout();
+    scheduleCompute(0);
   });
   pinLngLat = pinMarker.getLngLat();
   refreshPinReadout();
+  scheduleCompute(0);
 }
 
 function refreshPinReadout() {
@@ -205,12 +207,26 @@ function setStatus(msg) {
   document.getElementById('status').textContent = msg;
 }
 
+let computeToken = 0;
+let debounceHandle = null;
+
+function scheduleCompute(delayMs = 300) {
+  if (debounceHandle) clearTimeout(debounceHandle);
+  debounceHandle = setTimeout(() => {
+    debounceHandle = null;
+    if (pinLngLat) compute();
+  }, delayMs);
+}
+
 async function compute() {
   if (!pinLngLat) {
     setStatus('Click the map to set a pin first.');
     return;
   }
-  const heightAGL = parseFloat(document.getElementById('height').value);
+  const myToken = ++computeToken;
+  const heightRaw = parseFloat(document.getElementById('height').value);
+  const heightUnit = document.getElementById('heightUnit').value;
+  const heightAGL = heightUnit === 'ft' ? heightRaw * 0.3048 : heightRaw;
   const GR = parseFloat(document.getElementById('gr').value);
   const V = parseFloat(document.getElementById('airspeed').value) / 3.6; // m/s
   const W = parseFloat(document.getElementById('windSpeed').value) / 3.6; // m/s
@@ -240,6 +256,8 @@ async function compute() {
   const bounds = boundsAround(lat, lng, maxRange);
   await preloadTilesForBounds(bounds);
 
+  if (myToken !== computeToken) return; // a newer compute has started
+
   const baseElev = elevationAt(lat, lng);
   if (baseElev === null) {
     setStatus('Terrain tile missing — try again.');
@@ -251,6 +269,8 @@ async function compute() {
   setStatus('Tracing rays…');
   // Yield to the UI once before the sync compute.
   await new Promise((r) => requestAnimationFrame(r));
+
+  if (myToken !== computeToken) return;
 
   const ring = [];
   let blockedBearings = 0;
@@ -299,6 +319,8 @@ async function compute() {
 
   ring.push(ring[0]);
 
+  if (myToken !== computeToken) return; // newer compute superseded us
+
   const geojson = {
     type: 'FeatureCollection',
     features: [
@@ -332,5 +354,94 @@ function clearPolygon() {
   setStatus('');
 }
 
-document.getElementById('compute').addEventListener('click', compute);
+document.getElementById('compute').addEventListener('click', () => scheduleCompute(0));
 document.getElementById('clear').addEventListener('click', clearPolygon);
+
+// Auto-recompute on form changes.
+['height', 'gr', 'airspeed', 'windSpeed', 'windDir'].forEach((id) => {
+  document.getElementById(id).addEventListener('input', () => scheduleCompute());
+});
+document.getElementById('heightUnit').addEventListener('change', () => scheduleCompute());
+
+// --- compass rose ----------------------------------------------------------
+
+(function initCompass() {
+  const svg = document.getElementById('compass');
+  const arrow = document.getElementById('windArrow');
+  const input = document.getElementById('windDir');
+  const ticksGroup = document.getElementById('compassTicks');
+  const ARROW_R = 38;
+
+  // Ticks every 30°, longer every 90°.
+  for (let deg = 0; deg < 360; deg += 30) {
+    const rad = (deg * Math.PI) / 180;
+    const outer = 60;
+    const inner = deg % 90 === 0 ? 52 : 56;
+    const x1 = Math.sin(rad) * inner;
+    const y1 = -Math.cos(rad) * inner;
+    const x2 = Math.sin(rad) * outer;
+    const y2 = -Math.cos(rad) * outer;
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', x1);
+    line.setAttribute('y1', y1);
+    line.setAttribute('x2', x2);
+    line.setAttribute('y2', y2);
+    ticksGroup.appendChild(line);
+  }
+
+  function drawArrow(deg) {
+    const rad = (deg * Math.PI) / 180;
+    const fromX = Math.sin(rad) * ARROW_R;
+    const fromY = -Math.cos(rad) * ARROW_R;
+    arrow.setAttribute('x1', fromX);
+    arrow.setAttribute('y1', fromY);
+    arrow.setAttribute('x2', -fromX);
+    arrow.setAttribute('y2', -fromY);
+  }
+
+  function normalizeDeg(d) {
+    d = d % 360;
+    if (d < 0) d += 360;
+    return d;
+  }
+
+  function pointerToDeg(e) {
+    const rect = svg.getBoundingClientRect();
+    // SVG viewBox is -80..80 on each axis; map pointer into that frame.
+    const vx = ((e.clientX - rect.left) / rect.width) * 160 - 80;
+    const vy = ((e.clientY - rect.top) / rect.height) * 160 - 80;
+    const deg = (Math.atan2(vx, -vy) * 180) / Math.PI;
+    return normalizeDeg(Math.round(deg));
+  }
+
+  let dragging = false;
+
+  svg.addEventListener('pointerdown', (e) => {
+    dragging = true;
+    svg.setPointerCapture(e.pointerId);
+    const d = pointerToDeg(e);
+    input.value = d;
+    drawArrow(d);
+    scheduleCompute();
+    e.preventDefault();
+  });
+  svg.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const d = pointerToDeg(e);
+    input.value = d;
+    drawArrow(d);
+    scheduleCompute();
+  });
+  svg.addEventListener('pointerup', (e) => {
+    dragging = false;
+    try { svg.releasePointerCapture(e.pointerId); } catch {}
+  });
+  svg.addEventListener('pointercancel', () => { dragging = false; });
+
+  input.addEventListener('input', () => {
+    const v = parseFloat(input.value);
+    if (!Number.isNaN(v)) drawArrow(normalizeDeg(v));
+  });
+
+  drawArrow(normalizeDeg(parseFloat(input.value) || 0));
+})();

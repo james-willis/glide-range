@@ -57,6 +57,33 @@ body {
   background: white;
 }
 
+.field select {
+  padding: 8px 8px;
+  font-size: 14px;
+  border: 1px solid #c9c9cf;
+  border-radius: 4px;
+  background: white;
+}
+
+.input-row {
+  display: flex;
+  gap: 6px;
+}
+
+.input-row input { flex: 1; }
+
+.compass-wrap {
+  display: flex;
+  justify-content: center;
+  margin: 4px 0 8px;
+}
+
+#compass {
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+
 .field small {
   display: block;
   color: #777;
