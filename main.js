@@ -196,6 +196,73 @@ map.on('load', () => {
     },
   }, beforeId);
 
+  // Custom labels pulled straight from the OpenMapTiles vector source — the
+  // default Positron style is stingy about peaks and water names. Added on
+  // top of everything so they remain legible over the AGL raster.
+  if (map.getSource('openmaptiles')) {
+    const existingSymbol = map.getStyle().layers.find(
+      (l) => l.type === 'symbol' && l.layout && l.layout['text-font'],
+    );
+    const fontStack = existingSymbol
+      ? existingSymbol.layout['text-font']
+      : ['Noto Sans Regular'];
+
+    map.addLayer({
+      id: 'peak-labels',
+      type: 'symbol',
+      source: 'openmaptiles',
+      'source-layer': 'mountain_peak',
+      minzoom: 7,
+      filter: ['has', 'name'],
+      layout: {
+        'text-field': [
+          'concat',
+          ['coalesce', ['get', 'name_en'], ['get', 'name'], ''],
+          ['case',
+            ['has', 'ele'],
+            ['concat', '\n', ['to-string', ['get', 'ele']], ' m'],
+            '',
+          ],
+        ],
+        'text-font': fontStack,
+        'text-size': ['interpolate', ['linear'], ['zoom'], 8, 10, 14, 13],
+        'text-anchor': 'top',
+        'text-offset': [0, 0.3],
+        'text-justify': 'center',
+        'text-max-width': 8,
+        'symbol-sort-key': ['-', 10000, ['coalesce', ['get', 'ele'], 0]],
+      },
+      paint: {
+        'text-color': '#3c2f14',
+        'text-halo-color': '#ffffff',
+        'text-halo-width': 1.5,
+      },
+    });
+
+    map.addLayer({
+      id: 'water-name-labels',
+      type: 'symbol',
+      source: 'openmaptiles',
+      'source-layer': 'water_name',
+      minzoom: 7,
+      filter: ['all', ['has', 'name'], ['==', ['geometry-type'], 'Point']],
+      layout: {
+        'text-field': ['coalesce', ['get', 'name_en'], ['get', 'name']],
+        'text-font': fontStack,
+        'text-size': ['interpolate', ['linear'], ['zoom'], 8, 10, 14, 13],
+        'text-max-width': 8,
+        'text-justify': 'center',
+        'text-transform': 'none',
+        'text-letter-spacing': 0.05,
+      },
+      paint: {
+        'text-color': '#2a5b7a',
+        'text-halo-color': '#ffffff',
+        'text-halo-width': 1.3,
+      },
+    });
+  }
+
   applyUrlState();
 });
 
