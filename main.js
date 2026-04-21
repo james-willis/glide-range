@@ -75,21 +75,6 @@ map.on('load', () => {
     source: 'glide',
     paint: { 'line-color': '#006d77', 'line-width': 2 },
   });
-  // Comparison overlay: fixed-100 m outline only, dashed, high-contrast.
-  map.addSource('glide-compare', {
-    type: 'geojson',
-    data: { type: 'FeatureCollection', features: [] },
-  });
-  map.addLayer({
-    id: 'glide-compare-line',
-    type: 'line',
-    source: 'glide-compare',
-    paint: {
-      'line-color': '#d84315',
-      'line-width': 2,
-      'line-dasharray': [2, 2],
-    },
-  });
   applyUrlState();
 });
 
@@ -265,7 +250,6 @@ function writeUrl() {
   parts.push(`as=${document.getElementById('airspeed').value}`);
   parts.push(`ws=${document.getElementById('windSpeed').value}`);
   parts.push(`wd=${document.getElementById('windDir').value}`);
-  if (document.getElementById('compareFixed').checked) parts.push('cmp=1');
   const c = map.getCenter();
   parts.push(`c=${c.lat.toFixed(4)},${c.lng.toFixed(4)}`);
   parts.push(`z=${map.getZoom().toFixed(2)}`);
@@ -297,7 +281,6 @@ function applyUrlState() {
   setIfValid('airspeed', s.as);
   setIfValid('windSpeed', s.ws);
   setIfValid('windDir', s.wd);
-  if (s.cmp === '1') document.getElementById('compareFixed').checked = true;
 
   // Nudge the compass arrow to match wd.
   if (s.wd !== undefined) {
@@ -399,32 +382,11 @@ async function compute() {
   if (myToken !== computeToken) return;
   map.getSource('glide').setData(primary.geojson);
 
-  // Optional comparison overlay: fixed 100 m grid, outline only.
-  const compareOn = document.getElementById('compareFixed').checked;
-  let compareStatus = '';
-  if (compareOn && adaptiveCell > MIN_CELL_M) {
-    setStatus(`Running compare flood (cell 100 m)…`);
-    await new Promise((r) => requestAnimationFrame(r));
-    if (myToken !== computeToken) return;
-    try {
-      const compare = runFlood(ctx, 100);
-      map.getSource('glide-compare').setData(compare.geojson);
-      compareStatus =
-        ` | fixed-100m ${compare.nx}×${compare.ny} ` +
-        `t${compare.timings.terrain | 0} g${compare.timings.gpu | 0}`;
-    } catch (err) {
-      compareStatus = ' | compare failed: ' + err.message;
-    }
-  } else {
-    map.getSource('glide-compare').setData({ type: 'FeatureCollection', features: [] });
-  }
-
   const t = primary.timings;
   setStatus(
     `cell ${adaptiveCell | 0} m, ${primary.nx}×${primary.ny}, ` +
     `${primary.polyCount} poly — ` +
-    `t${t.terrain | 0} g${t.gpu | 0} c${t.contour | 0}ms` +
-    compareStatus,
+    `t${t.terrain | 0} g${t.gpu | 0} c${t.contour | 0}ms`,
   );
 }
 
@@ -531,7 +493,6 @@ document.getElementById('heightUnit').addEventListener('change', () => {
   refreshHeightSlider();
   scheduleCompute();
 });
-document.getElementById('compareFixed').addEventListener('change', () => scheduleCompute(0));
 
 // --- height slider ↔ number sync ------------------------------------------
 
