@@ -119,12 +119,14 @@ map.on('load', () => {
       paint: { 'fill-color': AGL_COLORS[i], 'fill-opacity': 0.45 },
     });
   }
-  // Outer boundary only (level 0 = the whole reachable region's outer edge).
+  // Black outline around the true outer edge of reachability only. Drawn from
+  // a dedicated "outline" feature so we don't also trace the inner band
+  // transitions.
   map.addLayer({
     id: 'glide-line',
     type: 'line',
     source: 'glide',
-    filter: ['==', ['get', 'level'], 0],
+    filter: ['has', 'outline'],
     paint: { 'line-color': '#333', 'line-width': 1.5 },
   });
   applyUrlState();
@@ -543,6 +545,20 @@ function runFlood(ctx, cellM) {
       type: 'Feature',
       geometry: { type: 'MultiPolygon', coordinates: bandPolys },
       properties: { level, aglMin: AGL_THRESHOLDS[level] },
+    });
+  }
+
+  // Outline feature: just contour[0] with its native unreachable-island holes.
+  // Any such holes also warrant a black line (those are reachability
+  // boundaries too — mountains poking up through the region).
+  const outlineCoords = perThreshold[0].coordinates.map((poly) =>
+    poly.map((ring) => ring.map(toLngLat)),
+  );
+  if (outlineCoords.length > 0) {
+    features.push({
+      type: 'Feature',
+      geometry: { type: 'MultiPolygon', coordinates: outlineCoords },
+      properties: { outline: true },
     });
   }
   const t3 = performance.now();
