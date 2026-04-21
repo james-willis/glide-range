@@ -144,6 +144,18 @@ button.secondary:hover { background: #ececee; }
 
 #sidebar footer p { margin: 0 0 6px; }
 
+label.inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: normal;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #333;
+  cursor: pointer;
+}
+
 #map {
   flex: 1;
   height: 100vh;

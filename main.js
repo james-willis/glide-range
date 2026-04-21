@@ -360,6 +360,7 @@ function writeUrl() {
   parts.push(`as=${document.getElementById('airspeed').value}`);
   parts.push(`ws=${document.getElementById('windSpeed').value}`);
   parts.push(`wd=${document.getElementById('windDir').value}`);
+  if (document.getElementById('verify').checked) parts.push('vfy=1');
   const c = map.getCenter();
   parts.push(`c=${c.lat.toFixed(4)},${c.lng.toFixed(4)}`);
   parts.push(`z=${map.getZoom().toFixed(2)}`);
@@ -391,6 +392,7 @@ function applyUrlState() {
   setIfValid('airspeed', s.as);
   setIfValid('windSpeed', s.ws);
   setIfValid('windDir', s.wd);
+  if (s.vfy === '1') document.getElementById('verify').checked = true;
 
   // Nudge the compass arrow to match wd.
   if (s.wd !== undefined) {
@@ -504,13 +506,46 @@ async function compute() {
   };
 
   const t = primary.timings;
+  let extra = '';
+
+  if (document.getElementById('verify').checked) {
+    if (myToken !== computeToken) return;
+    try {
+      const verify = await runFlood(ctx, adaptiveCell, { legacy: true });
+      if (myToken !== computeToken) return;
+      let maxDiff = 0;
+      let diffCount = 0;
+      for (let k = 0; k < primary.field.length; k++) {
+        const a = primary.field[k];
+        const b = verify.field[k];
+        // Compare reachability: if reachability itself flipped, always count.
+        // For AGL, only flag differences > 1 m to ignore FP noise.
+        const aR = a >= 0, bR = b >= 0;
+        if (aR !== bR) {
+          diffCount++;
+          const d = Math.max(Math.abs(a), Math.abs(b));
+          if (d > maxDiff) maxDiff = d;
+        } else if (aR && bR) {
+          const d = Math.abs(a - b);
+          if (d > 1) diffCount++;
+          if (d > maxDiff) maxDiff = d;
+        }
+      }
+      extra = ` | verify: Δmax ${maxDiff.toFixed(1)} m, ${diffCount} cells`;
+    } catch (err) {
+      extra = ' | verify failed';
+    }
+  }
+
   setStatus(
-    `cell ${adaptiveCell | 0} m, ${primary.nx}×${primary.ny} — ` +
-    `terrain ${t.terrain | 0} ms, GPU ${t.gpu | 0} ms, raster ${t.contour | 0} ms`,
+    `cell ${adaptiveCell | 0} m, ${primary.nx}×${primary.ny}, ` +
+    `${primary.actualIters}/${primary.iterations} iters — ` +
+    `terrain ${t.terrain | 0} ms, GPU ${t.gpu | 0} ms, raster ${t.contour | 0} ms` +
+    extra,
   );
 }
 
-async function runFlood(ctx, cellM) {
+async function runFlood(ctx, cellM, { legacy = false } = {}) {
   const { lat, lng, altMSL, Wx, Wy, V, GR, maxRange } = ctx;
   const n = Math.ceil(maxRange / cellM);
   const nx = 2 * n + 1;
@@ -551,9 +586,9 @@ async function runFlood(ctx, cellM) {
   const t1 = performance.now();
   if (!flooder) flooder = new GpuFlooder();
   const iterations = Math.ceil(n * 1.8 + 20);
-  const result = await flooder.flood({
+  const { result, actualIters } = await flooder.flood({
     nx, ny, terrain, altLoss,
-    pinI: n, pinJ: n, altMSL, iterations,
+    pinI: n, pinJ: n, altMSL, iterations, legacy,
   });
   const t2 = performance.now();
 
@@ -601,6 +636,7 @@ async function runFlood(ctx, cellM) {
   return {
     raster: { image: img, coordinates },
     field, nx, ny, n, cellM, degPerMLat, degPerMLng,
+    iterations, actualIters,
     timings: { terrain: t1 - t0, gpu: t2 - t1, contour: t3 - t2 },
   };
 }
@@ -638,6 +674,7 @@ document.getElementById('heightUnit').addEventListener('change', () => {
   refreshHeightSlider();
   scheduleCompute();
 });
+document.getElementById('verify').addEventListener('change', () => scheduleCompute(0));
 
 // --- height slider ↔ number sync ------------------------------------------
 
@@ -784,7 +821,7 @@ class GpuFlooder {
     this.canvas = canvas;
 
     const vs = `#version 300 es
-in vec2 a_pos;
+layout(location = 0) in vec2 a_pos;
 out vec2 v_uv;
 void main() {
   v_uv = a_pos * 0.5 + 0.5;
@@ -797,6 +834,7 @@ uniform highp sampler2D u_alt;
 uniform highp sampler2D u_terrain;
 uniform vec2 u_texel;
 uniform float u_loss[16];
+uniform bool u_discardStable;
 in vec2 v_uv;
 out vec4 outColor;
 
@@ -823,7 +861,21 @@ void main() {
     float arrival = nAlt - loss;
     if (arrival > terrain && arrival > best) best = arrival;
   }
+  // When u_discardStable is set, skip the write if the cell didn't change by
+  // more than a trivial amount — this lets occlusion queries count changed
+  // cells. The destination texture has already been primed with the previous
+  // iteration's values via the copy pass, so unchanged cells retain them.
+  if (u_discardStable && best <= self + 0.5) discard;
   outColor = vec4(best, 0.0, 0.0, 1.0);
+}`;
+
+    const copyFs = `#version 300 es
+precision highp float;
+uniform highp sampler2D u_src;
+in vec2 v_uv;
+out vec4 outColor;
+void main() {
+  outColor = texture(u_src, v_uv);
 }`;
 
     this.prog = this._makeProgram(vs, fs);
@@ -831,6 +883,10 @@ void main() {
     this.uTexel = gl.getUniformLocation(this.prog, 'u_texel');
     this.uAlt = gl.getUniformLocation(this.prog, 'u_alt');
     this.uTerrain = gl.getUniformLocation(this.prog, 'u_terrain');
+    this.uDiscardStable = gl.getUniformLocation(this.prog, 'u_discardStable');
+
+    this.copyProg = this._makeProgram(vs, copyFs);
+    this.uCopySrc = gl.getUniformLocation(this.copyProg, 'u_src');
 
     this.vao = gl.createVertexArray();
     gl.bindVertexArray(this.vao);
@@ -841,9 +897,8 @@ void main() {
       new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
       gl.STATIC_DRAW,
     );
-    const posLoc = gl.getAttribLocation(this.prog, 'a_pos');
-    gl.enableVertexAttribArray(posLoc);
-    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
 
     this.fbo = gl.createFramebuffer();
@@ -900,7 +955,7 @@ void main() {
     return this._chain;
   }
 
-  async _flood({ nx, ny, terrain, altLoss, pinI, pinJ, altMSL, iterations }) {
+  async _flood({ nx, ny, terrain, altLoss, pinI, pinJ, altMSL, iterations, legacy = false }) {
     const gl = this.gl;
     this.canvas.width = nx;
     this.canvas.height = ny;
@@ -913,23 +968,73 @@ void main() {
     let texA = this._makeTex(nx, ny, altInit);
     let texB = this._makeTex(nx, ny, null);
 
-    gl.useProgram(this.prog);
     gl.bindVertexArray(this.vao);
+
+    // Relax shader uniforms
+    gl.useProgram(this.prog);
     gl.uniform1fv(this.uLoss, altLoss);
     gl.uniform2f(this.uTexel, 1 / nx, 1 / ny);
     gl.uniform1i(this.uAlt, 0);
     gl.uniform1i(this.uTerrain, 1);
+    gl.uniform1i(this.uDiscardStable, legacy ? 0 : 1);
+
+    // Copy shader uniforms
+    gl.useProgram(this.copyProg);
+    gl.uniform1i(this.uCopySrc, 0);
+
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, terrainTex);
     gl.viewport(0, 0, nx, ny);
 
-    for (let i = 0; i < iterations; i++) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texB, 0);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, texA);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      [texA, texB] = [texB, texA];
+    let actualIters = 0;
+    if (legacy) {
+      // Original path: one relax pass per iteration, no convergence check.
+      gl.useProgram(this.prog);
+      for (let i = 0; i < iterations; i++) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texB, 0);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, texA);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        [texA, texB] = [texB, texA];
+        actualIters++;
+      }
+    } else {
+      // Convergence path: per iteration, copy src→dst, then run relax-with-discard
+      // wrapped in an occlusion query. When a drained query reports zero
+      // fragments (no cell changed), we've converged and can stop early.
+      const pending = [];
+      outer: for (let i = 0; i < iterations; i++) {
+        // Copy pass: ensure destination holds current values at non-changed cells
+        gl.useProgram(this.copyProg);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texB, 0);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, texA);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+        // Relax pass with discard + occlusion query
+        gl.useProgram(this.prog);
+        const query = gl.createQuery();
+        gl.beginQuery(gl.ANY_SAMPLES_PASSED_CONSERVATIVE, query);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        gl.endQuery(gl.ANY_SAMPLES_PASSED_CONSERVATIVE);
+
+        [texA, texB] = [texB, texA];
+        actualIters++;
+        pending.push(query);
+
+        // Non-blocking drain: any ready-and-zero query means converged.
+        while (pending.length > 0) {
+          const head = pending[0];
+          if (!gl.getQueryParameter(head, gl.QUERY_RESULT_AVAILABLE)) break;
+          const anyPassed = gl.getQueryParameter(head, gl.QUERY_RESULT);
+          gl.deleteQuery(head);
+          pending.shift();
+          if (!anyPassed) break outer;
+        }
+      }
+      for (const q of pending) gl.deleteQuery(q);
     }
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
@@ -963,7 +1068,7 @@ void main() {
     gl.deleteTexture(texB);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-    return out;
+    return { result: out, actualIters };
   }
 
   _waitFence(fence) {
