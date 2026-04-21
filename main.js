@@ -229,8 +229,6 @@ async function compute() {
     return;
   }
 
-  const btn = document.getElementById('compute');
-  btn.disabled = true;
   setStatus('Loading terrain tiles…');
 
   // Wind vector in ground frame. "Wind from D°" means parcels move toward D+180°.
@@ -245,7 +243,6 @@ async function compute() {
   const baseElev = elevationAt(lat, lng);
   if (baseElev === null) {
     setStatus('Terrain tile missing — try again.');
-    btn.disabled = false;
     return;
   }
   const heightAboveLaunch = altMSL - baseElev;
@@ -254,7 +251,6 @@ async function compute() {
       `Altitude ${altMSL.toFixed(0)} m MSL is below terrain at pin (${baseElev.toFixed(0)} m) — you're on the ground.`,
     );
     map.getSource('glide').setData({ type: 'FeatureCollection', features: [] });
-    btn.disabled = false;
     return;
   }
 
@@ -324,7 +320,6 @@ async function compute() {
     });
   } catch (err) {
     setStatus('GPU flood failed: ' + err.message);
-    btn.disabled = false;
     return;
   }
   if (myToken !== computeToken) return;
@@ -362,7 +357,6 @@ async function compute() {
     `${nx}×${ny} grid, ${coords.length} poly — ` +
     `terrain ${(t1 - t0) | 0}ms, GPU ${(t2 - t1) | 0}ms, contour ${(t3 - t2) | 0}ms`,
   );
-  btn.disabled = false;
 }
 
 function clearPolygon() {
@@ -378,7 +372,6 @@ function clearPolygon() {
   setStatus('');
 }
 
-document.getElementById('compute').addEventListener('click', () => scheduleCompute(0));
 document.getElementById('clear').addEventListener('click', clearPolygon);
 
 // Auto-recompute on form changes.

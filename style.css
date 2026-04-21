@@ -111,14 +111,6 @@ button {
   margin-bottom: 8px;
 }
 
-#compute {
-  background: #0a7e8c;
-  color: white;
-}
-
-#compute:hover { background: #0b95a4; }
-#compute:disabled { background: #888; cursor: wait; }
-
 button.secondary {
   background: transparent;
   color: #555;
