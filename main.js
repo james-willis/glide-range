@@ -163,22 +163,6 @@ function elevationAt(lat, lng) {
 
 const EARTH_R = 6371000;
 
-function destinationPoint(lat, lng, bearingDeg, distM) {
-  const δ = distM / EARTH_R;
-  const θ = (bearingDeg * Math.PI) / 180;
-  const φ1 = (lat * Math.PI) / 180;
-  const λ1 = (lng * Math.PI) / 180;
-  const sinφ2 = Math.sin(φ1) * Math.cos(δ) + Math.cos(φ1) * Math.sin(δ) * Math.cos(θ);
-  const φ2 = Math.asin(sinφ2);
-  const λ2 =
-    λ1 +
-    Math.atan2(
-      Math.sin(θ) * Math.sin(δ) * Math.cos(φ1),
-      Math.cos(δ) - Math.sin(φ1) * sinφ2,
-    );
-  return { lat: (φ2 * 180) / Math.PI, lng: (((λ2 * 180) / Math.PI + 540) % 360) - 180 };
-}
-
 function boundsAround(lat, lng, radiusM) {
   const dLat = (radiusM / EARTH_R) * (180 / Math.PI);
   const dLng = dLat / Math.cos((lat * Math.PI) / 180);
@@ -195,13 +179,20 @@ function boundsAround(lat, lng, radiusM) {
 // For a target ground bearing θ in a wind vector (Wx east, Wy north) at airspeed V:
 //   w∥(θ) = Wx sin θ + Wy cos θ     (wind component along the ground track)
 //   w⊥² = |W|² − w∥²                (perpendicular component squared)
-//   G(θ) = w∥ + √(V² − w⊥²)         (ground speed; NaN if w⊥ > V → can't make that bearing)
-// Altitude loss per metre of ground travel in direction θ:
+//   G(θ) = w∥ + √(V² − w⊥²)         (ground speed; impassable if w⊥ ≥ V)
+// Altitude loss per metre of ground travel:
 //   dh/dd = V / (GR · G(θ))
+//
+// Reachability is a parallel Bellman-Ford relaxation on a square grid: each
+// cell stores the highest altitude any path can deliver the pilot to; each
+// iteration, every cell in parallel reads its 8 neighbours and takes
+//   best = max(self, neighbour_alt − altLoss[neighbour→self])
+// stopping when the result would be below terrain. Runs on the GPU.
 
-const BEARINGS = 180;
-const STEP_M = 60;
-const MAX_RAY_M = 60000;
+const CELL_M = 100;                 // grid cell size (m)
+const MAX_RANGE_M = 150_000;        // hard cap on search radius
+const NEIGHBOR_DX = [-1, 1, 0, 0, -1, 1, -1, 1];
+const NEIGHBOR_DY = [0, 0, -1, 1, -1, -1, 1, 1];
 
 function setStatus(msg) {
   document.getElementById('status').textContent = msg;
@@ -209,6 +200,7 @@ function setStatus(msg) {
 
 let computeToken = 0;
 let debounceHandle = null;
+let flooder = null;
 
 function scheduleCompute(delayMs = 300) {
   if (debounceHandle) clearTimeout(debounceHandle);
@@ -241,15 +233,13 @@ async function compute() {
   btn.disabled = true;
   setStatus('Loading terrain tiles…');
 
-  // Wind vector in ground frame. "Wind from D°" means air parcels move toward D+180°.
+  // Wind vector in ground frame. "Wind from D°" means parcels move toward D+180°.
   const windToRad = ((windFromDeg + 180) * Math.PI) / 180;
-  const Wx = W * Math.sin(windToRad); // east
-  const Wy = W * Math.cos(windToRad); // north
+  const Wx = W * Math.sin(windToRad);
+  const Wy = W * Math.cos(windToRad);
 
   const { lat, lng } = pinLngLat;
 
-  // Need terrain under the pin first, to size the range estimate and
-  // sanity-check that the pilot is airborne.
   await preloadTilesForBounds(boundsAround(lat, lng, 500));
   if (myToken !== computeToken) return;
   const baseElev = elevationAt(lat, lng);
@@ -268,91 +258,110 @@ async function compute() {
     return;
   }
 
-  // Worst-case tailwind range for bounds estimate.
+  // Worst-case tailwind range, padded 25%, for grid sizing.
   const maxRange = Math.min(
-    MAX_RAY_M,
-    heightAboveLaunch * GR * (1 + W / V) * 1.15 + 500,
+    MAX_RANGE_M,
+    heightAboveLaunch * GR * (1 + W / V) * 1.25 + 500,
   );
+  const n = Math.ceil(maxRange / CELL_M);
+  const nx = 2 * n + 1;
+  const ny = 2 * n + 1;
 
   const bounds = boundsAround(lat, lng, maxRange);
   await preloadTilesForBounds(bounds);
+  if (myToken !== computeToken) return;
 
-  if (myToken !== computeToken) return; // a newer compute has started
-
-  const startAbsAlt = altMSL;
-
-  setStatus('Tracing rays…');
-  // Yield to the UI once before the sync compute.
+  setStatus(`Sampling terrain (${nx}×${ny})…`);
   await new Promise((r) => requestAnimationFrame(r));
+
+  const cosLat = Math.cos((lat * Math.PI) / 180);
+  const degPerMLat = 180 / Math.PI / EARTH_R;
+  const degPerMLng = degPerMLat / cosLat;
+
+  const t0 = performance.now();
+  const terrain = new Float32Array(nx * ny);
+  for (let j = 0; j < ny; j++) {
+    const latJ = lat + (j - n) * CELL_M * degPerMLat;
+    for (let i = 0; i < nx; i++) {
+      const lngI = lng + (i - n) * CELL_M * degPerMLng;
+      const e = elevationAt(latJ, lngI);
+      terrain[j * nx + i] = e === null || Number.isNaN(e) ? 99999 : e;
+    }
+  }
+  if (myToken !== computeToken) return;
+
+  // Precompute per-neighbour altitude loss. Movement is FROM neighbour TO self,
+  // so the edge direction is (−dx, −dy) in (east, north) cell units.
+  const altLoss = new Float32Array(8);
+  const BIG = 1e9;
+  for (let k = 0; k < 8; k++) {
+    const dE = -NEIGHBOR_DX[k] * CELL_M;
+    const dN = -NEIGHBOR_DY[k] * CELL_M;
+    const dist = Math.sqrt(dE * dE + dN * dN);
+    const bearing = Math.atan2(dE, dN);
+    const wPar = Wx * Math.sin(bearing) + Wy * Math.cos(bearing);
+    const wPerpSq = Wx * Wx + Wy * Wy - wPar * wPar;
+    if (wPerpSq >= V * V) { altLoss[k] = BIG; continue; }
+    const G = wPar + Math.sqrt(V * V - wPerpSq);
+    if (G <= 0.01) { altLoss[k] = BIG; continue; }
+    altLoss[k] = (dist * V) / (GR * G);
+  }
+
+  setStatus(`Flooding on GPU (${nx}×${ny})…`);
+  await new Promise((r) => requestAnimationFrame(r));
+  if (myToken !== computeToken) return;
+
+  const t1 = performance.now();
+  let result;
+  try {
+    if (!flooder) flooder = new GpuFlooder();
+    // 8-connected: info propagates 1 cell/iter in Chebyshev distance, so
+    // a worst-case detour around obstacles is bounded at ~2n cells.
+    const iterations = Math.ceil(n * 1.8 + 20);
+    result = flooder.flood({
+      nx, ny, terrain, altLoss,
+      pinI: n, pinJ: n, altMSL, iterations,
+    });
+  } catch (err) {
+    setStatus('GPU flood failed: ' + err.message);
+    btn.disabled = false;
+    return;
+  }
+  if (myToken !== computeToken) return;
+
+  const t2 = performance.now();
+  const field = new Float32Array(nx * ny);
+  for (let k = 0; k < nx * ny; k++) {
+    field[k] = result[k] < -1e8 ? -1 : result[k] - terrain[k];
+  }
+
+  const contourResult = d3.contours().size([nx, ny]).thresholds([0])(field);
+  const mp = contourResult[0];
+
+  const toLngLat = ([i, j]) => [
+    lng + (i - n) * CELL_M * degPerMLng,
+    lat + (j - n) * CELL_M * degPerMLat,
+  ];
+  const coords = mp.coordinates.map((polygon) =>
+    polygon.map((ring) => ring.map(toLngLat)),
+  );
 
   if (myToken !== computeToken) return;
 
-  const ring = [];
-  let blockedBearings = 0;
-
-  for (let i = 0; i < BEARINGS; i++) {
-    const bearing = (i * 360) / BEARINGS;
-    const θ = (bearing * Math.PI) / 180;
-    const wPar = Wx * Math.sin(θ) + Wy * Math.cos(θ);
-    const wPerpSq = Wx * Wx + Wy * Wy - wPar * wPar;
-
-    if (wPerpSq >= V * V) {
-      // Crosswind exceeds airspeed — can't crab to this track.
-      ring.push([lng, lat]);
-      blockedBearings++;
-      continue;
-    }
-    const G = wPar + Math.sqrt(V * V - wPerpSq);
-    if (G <= 0.01) {
-      ring.push([lng, lat]);
-      blockedBearings++;
-      continue;
-    }
-    const altLossPerM = V / (GR * G);
-
-    let d = 0;
-    let lastLng = lng;
-    let lastLat = lat;
-
-    while (d < MAX_RAY_M) {
-      d += STEP_M;
-      const altAtD = startAbsAlt - d * altLossPerM;
-      const pt = destinationPoint(lat, lng, bearing, d);
-      const terrain = elevationAt(pt.lat, pt.lng);
-      if (terrain === null) break;
-      if (altAtD <= terrain) {
-        lastLng = pt.lng;
-        lastLat = pt.lat;
-        break;
-      }
-      lastLng = pt.lng;
-      lastLat = pt.lat;
-      if (altAtD <= 0) break; // sanity
-    }
-    ring.push([lastLng, lastLat]);
-  }
-
-  ring.push(ring[0]);
-
-  if (myToken !== computeToken) return; // newer compute superseded us
-
-  const geojson = {
+  map.getSource('glide').setData({
     type: 'FeatureCollection',
-    features: [
-      {
-        type: 'Feature',
-        geometry: { type: 'Polygon', coordinates: [ring] },
-        properties: {},
-      },
-    ],
-  };
-  map.getSource('glide').setData(geojson);
+    features: [{
+      type: 'Feature',
+      geometry: { type: 'MultiPolygon', coordinates: coords },
+      properties: {},
+    }],
+  });
+  const t3 = performance.now();
 
-  const msg =
-    blockedBearings > 0
-      ? `Done. ${blockedBearings}/${BEARINGS} bearings blocked (crosswind > airspeed).`
-      : `Done. ${BEARINGS} rays traced.`;
-  setStatus(msg);
+  setStatus(
+    `${nx}×${ny} grid, ${coords.length} poly — ` +
+    `terrain ${(t1 - t0) | 0}ms, GPU ${(t2 - t1) | 0}ms, contour ${(t3 - t2) | 0}ms`,
+  );
   btn.disabled = false;
 }
 
@@ -460,3 +469,165 @@ document.getElementById('heightUnit').addEventListener('change', () => scheduleC
 
   drawArrow(normalizeDeg(parseFloat(input.value) || 0));
 })();
+
+// --- GPU flood -------------------------------------------------------------
+
+class GpuFlooder {
+  constructor() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1;
+    canvas.height = 1;
+    const gl = canvas.getContext('webgl2', { antialias: false });
+    if (!gl) throw new Error('WebGL2 not available');
+    if (!gl.getExtension('EXT_color_buffer_float')) {
+      throw new Error('EXT_color_buffer_float not available (needed for R32F render targets)');
+    }
+    this.gl = gl;
+    this.canvas = canvas;
+
+    const vs = `#version 300 es
+in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+  v_uv = a_pos * 0.5 + 0.5;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+
+    const fs = `#version 300 es
+precision highp float;
+uniform highp sampler2D u_alt;
+uniform highp sampler2D u_terrain;
+uniform vec2 u_texel;
+uniform float u_loss[8];
+in vec2 v_uv;
+out vec4 outColor;
+
+const vec2 OFFS[8] = vec2[](
+  vec2(-1.0, 0.0), vec2(1.0, 0.0),
+  vec2(0.0, -1.0), vec2(0.0, 1.0),
+  vec2(-1.0, -1.0), vec2(1.0, -1.0),
+  vec2(-1.0, 1.0), vec2(1.0, 1.0)
+);
+
+void main() {
+  float self = texture(u_alt, v_uv).r;
+  float terrain = texture(u_terrain, v_uv).r;
+  float best = self;
+  for (int k = 0; k < 8; k++) {
+    float loss = u_loss[k];
+    if (loss > 1e8) continue;
+    float nAlt = texture(u_alt, v_uv + OFFS[k] * u_texel).r;
+    if (nAlt < -1e8) continue;
+    float arrival = nAlt - loss;
+    if (arrival > terrain && arrival > best) best = arrival;
+  }
+  outColor = vec4(best, 0.0, 0.0, 1.0);
+}`;
+
+    this.prog = this._makeProgram(vs, fs);
+    this.uLoss = gl.getUniformLocation(this.prog, 'u_loss');
+    this.uTexel = gl.getUniformLocation(this.prog, 'u_texel');
+    this.uAlt = gl.getUniformLocation(this.prog, 'u_alt');
+    this.uTerrain = gl.getUniformLocation(this.prog, 'u_terrain');
+
+    this.vao = gl.createVertexArray();
+    gl.bindVertexArray(this.vao);
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+      gl.STATIC_DRAW,
+    );
+    const posLoc = gl.getAttribLocation(this.prog, 'a_pos');
+    gl.enableVertexAttribArray(posLoc);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+
+    this.fbo = gl.createFramebuffer();
+  }
+
+  _makeShader(type, src) {
+    const gl = this.gl;
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      const log = gl.getShaderInfoLog(s);
+      gl.deleteShader(s);
+      throw new Error('Shader compile: ' + log);
+    }
+    return s;
+  }
+
+  _makeProgram(vsSrc, fsSrc) {
+    const gl = this.gl;
+    const p = gl.createProgram();
+    gl.attachShader(p, this._makeShader(gl.VERTEX_SHADER, vsSrc));
+    gl.attachShader(p, this._makeShader(gl.FRAGMENT_SHADER, fsSrc));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      const log = gl.getProgramInfoLog(p);
+      gl.deleteProgram(p);
+      throw new Error('Program link: ' + log);
+    }
+    return p;
+  }
+
+  _makeTex(nx, ny, data) {
+    const gl = this.gl;
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, nx, ny, 0, gl.RED, gl.FLOAT, data);
+    return t;
+  }
+
+  flood({ nx, ny, terrain, altLoss, pinI, pinJ, altMSL, iterations }) {
+    const gl = this.gl;
+    this.canvas.width = nx;
+    this.canvas.height = ny;
+
+    const terrainTex = this._makeTex(nx, ny, terrain);
+
+    const altInit = new Float32Array(nx * ny);
+    altInit.fill(-1e9);
+    altInit[pinJ * nx + pinI] = altMSL;
+    let texA = this._makeTex(nx, ny, altInit);
+    let texB = this._makeTex(nx, ny, null);
+
+    gl.useProgram(this.prog);
+    gl.bindVertexArray(this.vao);
+    gl.uniform1fv(this.uLoss, altLoss);
+    gl.uniform2f(this.uTexel, 1 / nx, 1 / ny);
+    gl.uniform1i(this.uAlt, 0);
+    gl.uniform1i(this.uTerrain, 1);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, terrainTex);
+    gl.viewport(0, 0, nx, ny);
+
+    for (let i = 0; i < iterations; i++) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texB, 0);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texA);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      [texA, texB] = [texB, texA];
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texA, 0);
+    const out = new Float32Array(nx * ny);
+    gl.readPixels(0, 0, nx, ny, gl.RED, gl.FLOAT, out);
+
+    gl.deleteTexture(terrainTex);
+    gl.deleteTexture(texA);
+    gl.deleteTexture(texB);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    return out;
+  }
+}
