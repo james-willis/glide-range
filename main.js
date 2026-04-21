@@ -7,20 +7,6 @@ const map = new maplibregl.Map({
   style: {
     version: 8,
     sources: {
-      basemap: {
-        type: 'raster',
-        tiles: [
-          'https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
-          'https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
-          'https://c.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
-          'https://d.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
-        ],
-        tileSize: 256,
-        maxzoom: 19,
-        attribution:
-          '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> ' +
-          '© <a href="https://carto.com/attributions">CARTO</a>',
-      },
       terrain: {
         type: 'raster-dem',
         tiles: [
@@ -32,15 +18,33 @@ const map = new maplibregl.Map({
         attribution:
           'Terrain © <a href="https://registry.opendata.aws/terrain-tiles/">AWS Terrain Tiles</a>',
       },
+      labels: {
+        type: 'raster',
+        tiles: [
+          'https://a.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}.png',
+          'https://b.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}.png',
+          'https://c.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}.png',
+          'https://d.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}.png',
+        ],
+        tileSize: 256,
+        maxzoom: 19,
+        attribution:
+          '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> ' +
+          '© <a href="https://carto.com/attributions">CARTO</a>',
+      },
     },
     layers: [
-      { id: 'basemap', type: 'raster', source: 'basemap' },
+      {
+        id: 'background',
+        type: 'background',
+        paint: { 'background-color': '#f2ede4' },
+      },
       {
         id: 'hillshade',
         type: 'hillshade',
         source: 'terrain',
         paint: {
-          'hillshade-exaggeration': 0.55,
+          'hillshade-exaggeration': 0.6,
           'hillshade-shadow-color': '#4a3e28',
           'hillshade-highlight-color': '#ffffff',
           'hillshade-accent-color': '#000000',
@@ -209,6 +213,13 @@ map.on('load', () => {
       'raster-fade-duration': 0,
       'raster-resampling': 'linear',
     },
+  });
+  // Labels go above the AGL raster so place names stay legible over colour.
+  map.addLayer({
+    id: 'labels',
+    type: 'raster',
+    source: 'labels',
+    paint: { 'raster-opacity': 0.9, 'raster-fade-duration': 0 },
   });
   applyUrlState();
 });
