@@ -428,7 +428,7 @@ async function compute() {
 
   let primary;
   try {
-    primary = runFlood(ctx, adaptiveCell);
+    primary = await runFlood(ctx, adaptiveCell);
   } catch (err) {
     setStatus('GPU flood failed: ' + err.message);
     return;
@@ -454,7 +454,7 @@ async function compute() {
   );
 }
 
-function runFlood(ctx, cellM) {
+async function runFlood(ctx, cellM) {
   const { lat, lng, altMSL, Wx, Wy, V, GR, maxRange } = ctx;
   const n = Math.ceil(maxRange / cellM);
   const nx = 2 * n + 1;
@@ -495,7 +495,7 @@ function runFlood(ctx, cellM) {
   const t1 = performance.now();
   if (!flooder) flooder = new GpuFlooder();
   const iterations = Math.ceil(n * 1.8 + 20);
-  const result = flooder.flood({
+  const result = await flooder.flood({
     nx, ny, terrain, altLoss,
     pinI: n, pinJ: n, altMSL, iterations,
   });
@@ -818,6 +818,9 @@ void main() {
     gl.bindVertexArray(null);
 
     this.fbo = gl.createFramebuffer();
+
+    // Serializes overlapping flood() calls so they can't stomp GL state.
+    this._chain = Promise.resolve();
   }
 
   _makeShader(type, src) {
@@ -859,7 +862,16 @@ void main() {
     return t;
   }
 
-  flood({ nx, ny, terrain, altLoss, pinI, pinJ, altMSL, iterations }) {
+  flood(opts) {
+    const prev = this._chain;
+    this._chain = (async () => {
+      await prev.catch(() => {});
+      return this._flood(opts);
+    })();
+    return this._chain;
+  }
+
+  async _flood({ nx, ny, terrain, altLoss, pinI, pinJ, altMSL, iterations }) {
     const gl = this.gl;
     this.canvas.width = nx;
     this.canvas.height = ny;
@@ -893,8 +905,29 @@ void main() {
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texA, 0);
+
+    // Issue readback into a PBO — returns immediately; GPU fills the buffer
+    // asynchronously. We then fence + poll on requestAnimationFrame so the
+    // main thread stays responsive while the shader iterations finish.
+    const pbo = gl.createBuffer();
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo);
+    gl.bufferData(gl.PIXEL_PACK_BUFFER, nx * ny * 4, gl.STREAM_READ);
+    gl.readPixels(0, 0, nx, ny, gl.RED, gl.FLOAT, 0);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+
+    const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    gl.flush();
+    try {
+      await this._waitFence(fence);
+    } finally {
+      gl.deleteSync(fence);
+    }
+
     const out = new Float32Array(nx * ny);
-    gl.readPixels(0, 0, nx, ny, gl.RED, gl.FLOAT, out);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo);
+    gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, out);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    gl.deleteBuffer(pbo);
 
     gl.deleteTexture(terrainTex);
     gl.deleteTexture(texA);
@@ -902,5 +935,22 @@ void main() {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
     return out;
+  }
+
+  _waitFence(fence) {
+    const gl = this.gl;
+    return new Promise((resolve, reject) => {
+      const check = () => {
+        const status = gl.clientWaitSync(fence, 0, 0);
+        if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) {
+          resolve();
+        } else if (status === gl.WAIT_FAILED) {
+          reject(new Error('GL fence wait failed'));
+        } else {
+          requestAnimationFrame(check);
+        }
+      };
+      check();
+    });
   }
 }
