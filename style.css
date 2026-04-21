@@ -170,9 +170,12 @@ body.sidebar-hidden #sidebar-toggle { left: 10px; }
   #sidebar { width: 100%; flex: 0 0 auto; height: auto; border-right: none; border-bottom: 1px solid #d9d9dc; }
   #map { height: 60vh; }
   body.sidebar-hidden #map { height: 100vh; }
-  #sidebar-toggle,
-  body.sidebar-hidden #sidebar-toggle {
+  #sidebar-toggle {
     left: auto;
     right: 10px;
+  }
+  body.sidebar-hidden #sidebar-toggle {
+    left: 10px;
+    right: auto;
   }
 }
