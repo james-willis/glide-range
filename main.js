@@ -143,10 +143,6 @@ function refreshPinReadout() {
 }
 
 map.on('load', () => {
-  map.addSource('glide', {
-    type: 'geojson',
-    data: { type: 'FeatureCollection', features: [] },
-  });
   // Continuous AGL colouring via a raster image. One pixel per grid cell;
   // colours come from the RdYlGn LUT. Bilinear resampling keeps it smooth at
   // zoom-in.
@@ -166,15 +162,6 @@ map.on('load', () => {
       'raster-fade-duration': 0,
       'raster-resampling': 'linear',
     },
-  });
-  // Black outline around the outer edge of reachability (and any unreachable
-  // island holes, which are also reachability boundaries).
-  map.addLayer({
-    id: 'glide-line',
-    type: 'line',
-    source: 'glide',
-    filter: ['has', 'outline'],
-    paint: { 'line-color': '#333', 'line-width': 1.5 },
   });
   applyUrlState();
 });
@@ -448,7 +435,7 @@ async function compute() {
     setStatus(
       `Altitude ${altMSL.toFixed(0)} m MSL is below terrain at pin (${baseElev.toFixed(0)} m) — you're on the ground.`,
     );
-    map.getSource('glide').setData({ type: 'FeatureCollection', features: [] });
+    clearRaster();
     return;
   }
 
@@ -481,7 +468,6 @@ async function compute() {
     return;
   }
   if (myToken !== computeToken) return;
-  map.getSource('glide').setData(primary.geojson);
   await updateRasterSource(primary.raster.image, primary.raster.coordinates);
   if (myToken !== computeToken) return;
   lastCompute = {
@@ -497,9 +483,8 @@ async function compute() {
 
   const t = primary.timings;
   setStatus(
-    `cell ${adaptiveCell | 0} m, ${primary.nx}×${primary.ny}, ` +
-    `${primary.polyCount} poly — ` +
-    `t${t.terrain | 0} g${t.gpu | 0} c${t.contour | 0}ms`,
+    `cell ${adaptiveCell | 0} m, ${primary.nx}×${primary.ny} — ` +
+    `terrain ${t.terrain | 0} ms, GPU ${t.gpu | 0} ms, raster ${t.contour | 0} ms`,
   );
 }
 
@@ -589,38 +574,16 @@ async function runFlood(ctx, cellM) {
     [westLng, southLat],
   ];
 
-  // Outline (just the outer boundary of reachability) — built from a single
-  // d3.contours call at threshold 0.
-  const toLngLat = ([i, j]) => [
-    lng + (i - n) * cellM * degPerMLng,
-    lat + (j - n) * cellM * degPerMLat,
-  ];
-  const outerContour = d3.contours().size([nx, ny]).thresholds([0])(field)[0];
-  const outlineCoords = outerContour.coordinates.map((poly) =>
-    poly.map((ring) => ring.map(toLngLat)),
-  );
-  const outlineFeatures = outlineCoords.length > 0
-    ? [{
-        type: 'Feature',
-        geometry: { type: 'MultiPolygon', coordinates: outlineCoords },
-        properties: { outline: true },
-      }]
-    : [];
   const t3 = performance.now();
 
   return {
-    geojson: { type: 'FeatureCollection', features: outlineFeatures },
     raster: { image: img, coordinates },
     field, nx, ny, n, cellM, degPerMLat, degPerMLng,
-    polyCount: outlineCoords.length,
     timings: { terrain: t1 - t0, gpu: t2 - t1, contour: t3 - t2 },
   };
 }
 
-function clearPolygon() {
-  if (map.getSource('glide')) {
-    map.getSource('glide').setData({ type: 'FeatureCollection', features: [] });
-  }
+function clearRaster() {
   if (map.getSource('glide-raster')) {
     // Move the raster off-screen with a degenerate footprint so it's
     // invisible until the next compute.
@@ -628,6 +591,10 @@ function clearPolygon() {
       [-1, 1], [1, 1], [1, -1], [-1, -1],
     ]);
   }
+}
+
+function clearPolygon() {
+  clearRaster();
   if (pinMarker) {
     pinMarker.remove();
     pinMarker = null;
