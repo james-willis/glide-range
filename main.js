@@ -7,21 +7,22 @@ const map = new maplibregl.Map({
   style: {
     version: 8,
     sources: {
-      otm: {
+      basemap: {
         type: 'raster',
         tiles: [
-          'https://a.tile.opentopomap.org/{z}/{x}/{y}.png',
-          'https://b.tile.opentopomap.org/{z}/{x}/{y}.png',
-          'https://c.tile.opentopomap.org/{z}/{x}/{y}.png',
+          'https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
+          'https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
+          'https://c.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
+          'https://d.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
         ],
         tileSize: 256,
-        maxzoom: 17,
+        maxzoom: 19,
         attribution:
-          'Map data © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, ' +
-          'SRTM | Style © <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)',
+          '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> ' +
+          '© <a href="https://carto.com/attributions">CARTO</a>',
       },
     },
-    layers: [{ id: 'otm', type: 'raster', source: 'otm' }],
+    layers: [{ id: 'basemap', type: 'raster', source: 'basemap' }],
   },
   center: [-122.0306, 47.5133], // Poo Poo Point LZ, Tiger Mountain
   zoom: 13,
