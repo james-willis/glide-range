@@ -75,6 +75,21 @@ map.on('load', () => {
     source: 'glide',
     paint: { 'line-color': '#006d77', 'line-width': 2 },
   });
+  // Comparison overlay: fixed-100 m outline only, dashed, high-contrast.
+  map.addSource('glide-compare', {
+    type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] },
+  });
+  map.addLayer({
+    id: 'glide-compare-line',
+    type: 'line',
+    source: 'glide-compare',
+    paint: {
+      'line-color': '#d84315',
+      'line-width': 2,
+      'line-dasharray': [2, 2],
+    },
+  });
   applyUrlState();
 });
 
@@ -195,8 +210,9 @@ function boundsAround(lat, lng, radiusM) {
 //   best = max(self, neighbour_alt − altLoss[neighbour→self])
 // stopping when the result would be below terrain. Runs on the GPU.
 
-const CELL_M = 100;                 // grid cell size (m)
+const MIN_CELL_M = 100;             // finest grid cell size (m)
 const MAX_RANGE_M = 150_000;        // hard cap on search radius
+const GRID_BUDGET = 400;            // targets ~(2*400+1)² = ~800² cells
 // 16-connected template: 8 king moves + 8 knight-like moves. The knight moves
 // add directions at ~26.6° and ~63.4°, which cuts the octagonal anisotropy of
 // an 8-only grid from ~8% worst-case to ~2% (the reachable set approaches a
@@ -248,6 +264,7 @@ function writeUrl() {
   parts.push(`as=${document.getElementById('airspeed').value}`);
   parts.push(`ws=${document.getElementById('windSpeed').value}`);
   parts.push(`wd=${document.getElementById('windDir').value}`);
+  if (document.getElementById('compareFixed').checked) parts.push('cmp=1');
   const c = map.getCenter();
   parts.push(`c=${c.lat.toFixed(4)},${c.lng.toFixed(4)}`);
   parts.push(`z=${map.getZoom().toFixed(2)}`);
@@ -279,6 +296,7 @@ function applyUrlState() {
   setIfValid('airspeed', s.as);
   setIfValid('windSpeed', s.ws);
   setIfValid('windDir', s.wd);
+  if (s.cmp === '1') document.getElementById('compareFixed').checked = true;
 
   // Nudge the compass arrow to match wd.
   if (s.wd !== undefined) {
@@ -351,16 +369,63 @@ async function compute() {
     MAX_RANGE_M,
     heightAboveLaunch * GR * (1 + W / V) * 1.25 + 500,
   );
-  const n = Math.ceil(maxRange / CELL_M);
-  const nx = 2 * n + 1;
-  const ny = 2 * n + 1;
 
   const bounds = boundsAround(lat, lng, maxRange);
   await preloadTilesForBounds(bounds);
   if (myToken !== computeToken) return;
 
-  setStatus(`Sampling terrain (${nx}×${ny})…`);
+  const ctx = { lat, lng, altMSL, Wx, Wy, V, GR, maxRange };
+
+  // Primary run: adaptive cell size — finer at short range, coarser at long.
+  const adaptiveCell = Math.max(MIN_CELL_M, maxRange / GRID_BUDGET);
+  setStatus(`Flooding (cell ${adaptiveCell | 0} m)…`);
   await new Promise((r) => requestAnimationFrame(r));
+  if (myToken !== computeToken) return;
+
+  let primary;
+  try {
+    primary = runFlood(ctx, adaptiveCell);
+  } catch (err) {
+    setStatus('GPU flood failed: ' + err.message);
+    return;
+  }
+  if (myToken !== computeToken) return;
+  map.getSource('glide').setData(primary.geojson);
+
+  // Optional comparison overlay: fixed 100 m grid, outline only.
+  const compareOn = document.getElementById('compareFixed').checked;
+  let compareStatus = '';
+  if (compareOn && adaptiveCell > MIN_CELL_M) {
+    setStatus(`Running compare flood (cell 100 m)…`);
+    await new Promise((r) => requestAnimationFrame(r));
+    if (myToken !== computeToken) return;
+    try {
+      const compare = runFlood(ctx, 100);
+      map.getSource('glide-compare').setData(compare.geojson);
+      compareStatus =
+        ` | fixed-100m ${compare.nx}×${compare.ny} ` +
+        `t${compare.timings.terrain | 0} g${compare.timings.gpu | 0}`;
+    } catch (err) {
+      compareStatus = ' | compare failed: ' + err.message;
+    }
+  } else {
+    map.getSource('glide-compare').setData({ type: 'FeatureCollection', features: [] });
+  }
+
+  const t = primary.timings;
+  setStatus(
+    `cell ${adaptiveCell | 0} m, ${primary.nx}×${primary.ny}, ` +
+    `${primary.polyCount} poly — ` +
+    `t${t.terrain | 0} g${t.gpu | 0} c${t.contour | 0}ms` +
+    compareStatus,
+  );
+}
+
+function runFlood(ctx, cellM) {
+  const { lat, lng, altMSL, Wx, Wy, V, GR, maxRange } = ctx;
+  const n = Math.ceil(maxRange / cellM);
+  const nx = 2 * n + 1;
+  const ny = 2 * n + 1;
 
   const cosLat = Math.cos((lat * Math.PI) / 180);
   const degPerMLat = 180 / Math.PI / EARTH_R;
@@ -369,22 +434,21 @@ async function compute() {
   const t0 = performance.now();
   const terrain = new Float32Array(nx * ny);
   for (let j = 0; j < ny; j++) {
-    const latJ = lat + (j - n) * CELL_M * degPerMLat;
+    const latJ = lat + (j - n) * cellM * degPerMLat;
     for (let i = 0; i < nx; i++) {
-      const lngI = lng + (i - n) * CELL_M * degPerMLng;
+      const lngI = lng + (i - n) * cellM * degPerMLng;
       const e = elevationAt(latJ, lngI);
       terrain[j * nx + i] = e === null || Number.isNaN(e) ? 99999 : e;
     }
   }
-  if (myToken !== computeToken) return;
 
-  // Precompute per-neighbour altitude loss. Movement is FROM neighbour TO self,
-  // so the edge direction is (−dx, −dy) in (east, north) cell units.
+  // Per-neighbour altitude loss for movement FROM neighbour TO self:
+  // edge direction is (−dx, −dy) in (east, north) cell units.
   const altLoss = new Float32Array(N_NEIGHBORS);
   const BIG = 1e9;
   for (let k = 0; k < N_NEIGHBORS; k++) {
-    const dE = -NEIGHBOR_DX[k] * CELL_M;
-    const dN = -NEIGHBOR_DY[k] * CELL_M;
+    const dE = -NEIGHBOR_DX[k] * cellM;
+    const dN = -NEIGHBOR_DY[k] * cellM;
     const dist = Math.sqrt(dE * dE + dN * dN);
     const bearing = Math.atan2(dE, dN);
     const wPar = Wx * Math.sin(bearing) + Wy * Math.cos(bearing);
@@ -395,28 +459,15 @@ async function compute() {
     altLoss[k] = (dist * V) / (GR * G);
   }
 
-  setStatus(`Flooding on GPU (${nx}×${ny})…`);
-  await new Promise((r) => requestAnimationFrame(r));
-  if (myToken !== computeToken) return;
-
   const t1 = performance.now();
-  let result;
-  try {
-    if (!flooder) flooder = new GpuFlooder();
-    // 8-connected: info propagates 1 cell/iter in Chebyshev distance, so
-    // a worst-case detour around obstacles is bounded at ~2n cells.
-    const iterations = Math.ceil(n * 1.8 + 20);
-    result = flooder.flood({
-      nx, ny, terrain, altLoss,
-      pinI: n, pinJ: n, altMSL, iterations,
-    });
-  } catch (err) {
-    setStatus('GPU flood failed: ' + err.message);
-    return;
-  }
-  if (myToken !== computeToken) return;
-
+  if (!flooder) flooder = new GpuFlooder();
+  const iterations = Math.ceil(n * 1.8 + 20);
+  const result = flooder.flood({
+    nx, ny, terrain, altLoss,
+    pinI: n, pinJ: n, altMSL, iterations,
+  });
   const t2 = performance.now();
+
   const field = new Float32Array(nx * ny);
   for (let k = 0; k < nx * ny; k++) {
     field[k] = result[k] < -1e8 ? -1 : result[k] - terrain[k];
@@ -425,30 +476,28 @@ async function compute() {
   const contourResult = d3.contours().size([nx, ny]).thresholds([0])(field);
   const mp = contourResult[0];
 
-  const toLngLat = ([i, j]) => [
-    lng + (i - n) * CELL_M * degPerMLng,
-    lat + (j - n) * CELL_M * degPerMLat,
-  ];
   const coords = mp.coordinates.map((polygon) =>
-    polygon.map((ring) => ring.map(toLngLat)),
+    polygon.map((ring) =>
+      ring.map(([i, j]) => [
+        lng + (i - n) * cellM * degPerMLng,
+        lat + (j - n) * cellM * degPerMLat,
+      ]),
+    ),
   );
-
-  if (myToken !== computeToken) return;
-
-  map.getSource('glide').setData({
-    type: 'FeatureCollection',
-    features: [{
-      type: 'Feature',
-      geometry: { type: 'MultiPolygon', coordinates: coords },
-      properties: {},
-    }],
-  });
   const t3 = performance.now();
 
-  setStatus(
-    `${nx}×${ny} grid, ${coords.length} poly — ` +
-    `terrain ${(t1 - t0) | 0}ms, GPU ${(t2 - t1) | 0}ms, contour ${(t3 - t2) | 0}ms`,
-  );
+  return {
+    geojson: {
+      type: 'FeatureCollection',
+      features: [{
+        type: 'Feature',
+        geometry: { type: 'MultiPolygon', coordinates: coords },
+        properties: {},
+      }],
+    },
+    nx, ny, polyCount: coords.length,
+    timings: { terrain: t1 - t0, gpu: t2 - t1, contour: t3 - t2 },
+  };
 }
 
 function clearPolygon() {
@@ -472,6 +521,7 @@ document.getElementById('clear').addEventListener('click', clearPolygon);
   document.getElementById(id).addEventListener('input', () => scheduleCompute());
 });
 document.getElementById('heightUnit').addEventListener('change', () => scheduleCompute());
+document.getElementById('compareFixed').addEventListener('change', () => scheduleCompute(0));
 
 // --- compass rose ----------------------------------------------------------
 
