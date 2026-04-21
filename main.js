@@ -106,20 +106,42 @@ async function updateRasterSource(imageData, coordinates) {
 }
 
 function handleMapClick(e) {
-  const agl = aglAt(e.lngLat);
-  if (agl != null) {
-    const unit = document.getElementById('heightUnit').value;
-    const text = unit === 'ft'
-      ? `${(agl / 0.3048).toFixed(0)} ft AGL`
-      : `${agl.toFixed(0)} m AGL`;
-    new maplibregl.Popup({ closeButton: false, closeOnClick: true })
-      .setLngLat(e.lngLat)
-      .setHTML(`<strong>${text}</strong>`)
-      .addTo(map);
-    return;
-  }
   setPin(e.lngLat);
 }
+
+// Hover tooltip for AGL at cursor. Reuses a single Popup so it follows the
+// mouse without flicker.
+const hoverPopup = new maplibregl.Popup({
+  closeButton: false,
+  closeOnClick: false,
+  offset: 12,
+});
+
+function handleMapMouseMove(e) {
+  const agl = aglAt(e.lngLat);
+  if (agl == null) {
+    hoverPopup.remove();
+    map.getCanvas().style.cursor = '';
+    return;
+  }
+  const unit = document.getElementById('heightUnit').value;
+  const text = unit === 'ft'
+    ? `${(agl / 0.3048).toFixed(0)} ft AGL`
+    : `${agl.toFixed(0)} m AGL`;
+  hoverPopup
+    .setLngLat(e.lngLat)
+    .setHTML(`<strong>${text}</strong>`)
+    .addTo(map);
+  map.getCanvas().style.cursor = 'crosshair';
+}
+
+function handleMapMouseLeave() {
+  hoverPopup.remove();
+  map.getCanvas().style.cursor = '';
+}
+
+map.on('mousemove', handleMapMouseMove);
+map.on('mouseout', handleMapMouseLeave);
 
 function setPin(lngLat) {
   if (pinMarker) pinMarker.remove();
