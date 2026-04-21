@@ -72,6 +72,13 @@ body {
 
 .input-row input { flex: 1; }
 
+.field input[type="range"] {
+  width: 100%;
+  padding: 0;
+  margin-top: 8px;
+  accent-color: #0a7e8c;
+}
+
 .compass-wrap {
   display: flex;
   justify-content: center;

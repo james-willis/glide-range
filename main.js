@@ -234,6 +234,7 @@ function setStatus(msg) {
 let computeToken = 0;
 let debounceHandle = null;
 let flooder = null;
+let lastBaseElevM = null;
 
 function scheduleCompute(delayMs = 300) {
   if (debounceHandle) clearTimeout(debounceHandle);
@@ -355,6 +356,9 @@ async function compute() {
     setStatus('Terrain tile missing — try again.');
     return;
   }
+  lastBaseElevM = baseElev;
+  refreshHeightSlider();
+
   const heightAboveLaunch = altMSL - baseElev;
   if (heightAboveLaunch <= 0) {
     setStatus(
@@ -520,8 +524,57 @@ document.getElementById('clear').addEventListener('click', clearPolygon);
 ['height', 'gr', 'airspeed', 'windSpeed', 'windDir'].forEach((id) => {
   document.getElementById(id).addEventListener('input', () => scheduleCompute());
 });
-document.getElementById('heightUnit').addEventListener('change', () => scheduleCompute());
+document.getElementById('heightUnit').addEventListener('change', () => {
+  refreshHeightSlider();
+  scheduleCompute();
+});
 document.getElementById('compareFixed').addEventListener('change', () => scheduleCompute(0));
+
+// --- height slider ↔ number sync ------------------------------------------
+
+const MAX_ALT_FT = 18000;
+const MAX_ALT_M = MAX_ALT_FT * 0.3048; // ≈ 5486.4 m
+
+function refreshHeightSlider() {
+  const slider = document.getElementById('heightSlider');
+  const number = document.getElementById('height');
+  const unit = document.getElementById('heightUnit').value;
+  const floorM = lastBaseElevM != null ? Math.max(0, Math.ceil(lastBaseElevM)) : 0;
+  if (unit === 'ft') {
+    slider.min = String(Math.ceil(floorM / 0.3048));
+    slider.max = String(MAX_ALT_FT);
+    slider.step = '50';
+  } else {
+    slider.min = String(floorM);
+    slider.max = String(Math.ceil(MAX_ALT_M));
+    slider.step = '10';
+  }
+  const v = parseFloat(number.value);
+  if (!Number.isNaN(v)) {
+    const clamped = Math.min(parseFloat(slider.max), Math.max(parseFloat(slider.min), v));
+    slider.value = String(clamped);
+    if (clamped !== v) number.value = String(clamped);
+  }
+  const hint = document.getElementById('heightHint');
+  if (lastBaseElevM != null) {
+    const f = unit === 'ft' ? slider.min : `${slider.min} m`;
+    hint.textContent =
+      unit === 'ft'
+        ? `Slider: ${slider.min} – ${MAX_ALT_FT} ft (pin terrain → 18 k ft).`
+        : `Slider: ${slider.min} – ${slider.max} m (pin terrain → 18 k ft).`;
+  }
+}
+
+document.getElementById('heightSlider').addEventListener('input', (e) => {
+  const number = document.getElementById('height');
+  number.value = e.target.value;
+  scheduleCompute();
+});
+document.getElementById('height').addEventListener('input', (e) => {
+  const slider = document.getElementById('heightSlider');
+  slider.value = e.target.value;
+});
+refreshHeightSlider();
 
 // --- compass rose ----------------------------------------------------------
 
