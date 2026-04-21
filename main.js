@@ -4,55 +4,7 @@
 
 const map = new maplibregl.Map({
   container: 'map',
-  style: {
-    version: 8,
-    sources: {
-      terrain: {
-        type: 'raster-dem',
-        tiles: [
-          'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png',
-        ],
-        encoding: 'terrarium',
-        tileSize: 256,
-        maxzoom: 15,
-        attribution:
-          'Terrain © <a href="https://registry.opendata.aws/terrain-tiles/">AWS Terrain Tiles</a>',
-      },
-      labels: {
-        type: 'raster',
-        tiles: [
-          'https://a.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}.png',
-          'https://b.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}.png',
-          'https://c.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}.png',
-          'https://d.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}.png',
-        ],
-        tileSize: 256,
-        maxzoom: 19,
-        attribution:
-          '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> ' +
-          '© <a href="https://carto.com/attributions">CARTO</a>',
-      },
-    },
-    layers: [
-      {
-        id: 'background',
-        type: 'background',
-        paint: { 'background-color': '#f2ede4' },
-      },
-      {
-        id: 'hillshade',
-        type: 'hillshade',
-        source: 'terrain',
-        paint: {
-          'hillshade-exaggeration': 0.6,
-          'hillshade-shadow-color': '#4a3e28',
-          'hillshade-highlight-color': '#ffffff',
-          'hillshade-accent-color': '#000000',
-          'hillshade-illumination-direction': 335,
-        },
-      },
-    ],
-  },
+  style: 'https://tiles.openfreemap.org/styles/positron',
   center: [-122.0306, 47.5133], // Poo Poo Point LZ, Tiger Mountain
   zoom: 13,
 });
@@ -194,6 +146,35 @@ function refreshPinReadout() {
 }
 
 map.on('load', () => {
+  // Insert our layers BEFORE the first label (symbol) layer from the loaded
+  // OpenFreeMap style, so place/peak/water names stay on top.
+  const firstSymbol = map.getStyle().layers.find((l) => l.type === 'symbol');
+  const beforeId = firstSymbol ? firstSymbol.id : undefined;
+
+  map.addSource('terrain-dem', {
+    type: 'raster-dem',
+    tiles: [
+      'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png',
+    ],
+    encoding: 'terrarium',
+    tileSize: 256,
+    maxzoom: 15,
+    attribution:
+      'Terrain © <a href="https://registry.opendata.aws/terrain-tiles/">AWS Terrain Tiles</a>',
+  });
+  map.addLayer({
+    id: 'hillshade',
+    type: 'hillshade',
+    source: 'terrain-dem',
+    paint: {
+      'hillshade-exaggeration': 0.55,
+      'hillshade-shadow-color': '#4a3e28',
+      'hillshade-highlight-color': '#ffffff',
+      'hillshade-accent-color': '#000000',
+      'hillshade-illumination-direction': 335,
+    },
+  }, beforeId);
+
   // Continuous AGL colouring via a raster image. One pixel per grid cell;
   // colours come from the RdYlGn LUT. Bilinear resampling keeps it smooth at
   // zoom-in.
@@ -213,14 +194,8 @@ map.on('load', () => {
       'raster-fade-duration': 0,
       'raster-resampling': 'linear',
     },
-  });
-  // Labels go above the AGL raster so place names stay legible over colour.
-  map.addLayer({
-    id: 'labels',
-    type: 'raster',
-    source: 'labels',
-    paint: { 'raster-opacity': 0.9, 'raster-fade-duration': 0 },
-  });
+  }, beforeId);
+
   applyUrlState();
 });
 
