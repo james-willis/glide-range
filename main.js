@@ -271,6 +271,23 @@ map.on('moveend', (e) => {
   if (e.originalEvent) scheduleUrlWrite();
 });
 
+// Sidebar show/hide.
+(function initSidebarToggle() {
+  const toggle = document.getElementById('sidebar-toggle');
+  const sidebar = document.getElementById('sidebar');
+  const setIcon = () => {
+    toggle.textContent = document.body.classList.contains('sidebar-hidden')
+      ? '☰'
+      : '‹';
+  };
+  toggle.addEventListener('click', () => {
+    document.body.classList.toggle('sidebar-hidden');
+    setIcon();
+  });
+  sidebar.addEventListener('transitionend', () => map.resize());
+  setIcon();
+})();
+
 // --- terrain: Nextzen terrarium tiles --------------------------------------
 
 const TILE_ZOOM = 12;

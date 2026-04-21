@@ -22,7 +22,39 @@ body {
   height: 100vh;
   display: flex;
   flex-direction: column;
+  transition: flex-basis 0.25s ease, width 0.25s ease, padding 0.25s ease;
 }
+
+body.sidebar-hidden #sidebar {
+  width: 0;
+  flex: 0 0 0;
+  padding-left: 0;
+  padding-right: 0;
+  overflow: hidden;
+}
+
+#sidebar-toggle {
+  position: fixed;
+  top: 10px;
+  left: 222px;
+  z-index: 10;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  background: white;
+  border: 1px solid #c9c9cf;
+  border-radius: 4px;
+  color: #333;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  transition: left 0.25s ease;
+}
+
+#sidebar-toggle:hover { background: #f0f0f0; }
+
+body.sidebar-hidden #sidebar-toggle { left: 10px; }
 
 #sidebar h1 {
   font-size: 16px;
