@@ -444,7 +444,7 @@ async function compute() {
     return;
   }
 
-  setStatus('Loading terrain tiles…');
+  setStatus('');
 
   // Wind vector in ground frame. "Wind from D°" means parcels move toward D+180°.
   const windToRad = ((windFromDeg + 180) * Math.PI) / 180;
@@ -489,7 +489,6 @@ async function compute() {
 
   // Primary run: adaptive cell size — finer at short range, coarser at long.
   const adaptiveCell = Math.max(MIN_CELL_M, maxRange / GRID_BUDGET);
-  setStatus(`Flooding (cell ${adaptiveCell | 0} m)…`);
   await new Promise((r) => requestAnimationFrame(r));
   if (myToken !== computeToken) return;
 
@@ -514,12 +513,7 @@ async function compute() {
     lat, lng,
   };
 
-  const t = primary.timings;
-  setStatus(
-    `cell ${adaptiveCell | 0} m, ${primary.nx}×${primary.ny}, ` +
-    `${primary.actualIters}/${primary.iterations} iters — ` +
-    `terrain ${t.terrain | 0} ms, GPU ${t.gpu | 0} ms, raster ${t.contour | 0} ms`,
-  );
+  setStatus('');
 }
 
 async function runFlood(ctx, cellM) {
@@ -649,21 +643,6 @@ function clearRaster() {
     ]);
   }
 }
-
-function clearPolygon() {
-  clearRaster();
-  if (pinMarker) {
-    pinMarker.remove();
-    pinMarker = null;
-    pinLngLat = null;
-    document.getElementById('coords').textContent = '(not set — click map)';
-  }
-  lastCompute = null;
-  setStatus('');
-  scheduleUrlWrite();
-}
-
-document.getElementById('clear').addEventListener('click', clearPolygon);
 
 // Auto-recompute on form changes.
 ['height', 'gr', 'airspeed', 'windSpeed', 'windDir'].forEach((id) => {

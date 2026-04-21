@@ -10,15 +10,14 @@
 <body>
   <aside id="sidebar">
     <h1>glide-range</h1>
-    <p class="intro">Click the map to place a launch pin, then enter your parameters.</p>
 
     <div class="field">
       <label>Pin</label>
-      <div id="coords" class="readout">(not set — click map)</div>
+      <div id="coords" class="readout">(click map)</div>
     </div>
 
     <div class="field">
-      <label for="height">Altitude (MSL)</label>
+      <label for="height">Altitude MSL</label>
       <div class="input-row">
         <input id="height" type="number" value="1500" min="0" step="50" />
         <select id="heightUnit">
@@ -27,54 +26,49 @@
         </select>
       </div>
       <input id="heightSlider" type="range" min="0" max="5486" step="10" value="1500" />
-      <small id="heightHint">Slider: pin terrain → 18 000 ft. Updates after first compute.</small>
     </div>
 
-    <div class="field">
-      <label for="gr">Glide ratio (still air)</label>
-      <input id="gr" type="number" value="7" min="1" step="0.5" />
-    </div>
-
-    <div class="field">
-      <label for="airspeed">Airspeed, trim (km/h)</label>
-      <input id="airspeed" type="number" value="37" min="10" step="1" />
-    </div>
-
-    <div class="field">
-      <label for="windSpeed">Wind speed (km/h)</label>
-      <input id="windSpeed" type="number" value="15" min="0" step="1" />
-    </div>
-
-    <div class="field">
-      <label for="windDir">Wind direction (° from)</label>
-      <div class="compass-wrap">
-        <svg id="compass" viewBox="-80 -80 160 160" width="140" height="140" aria-label="Wind direction compass">
-          <defs>
-            <marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
-              <path d="M 0 0 L 10 5 L 0 10 z" fill="#d9534f" />
-            </marker>
-          </defs>
-          <circle cx="0" cy="0" r="62" fill="white" stroke="#c9c9cf" stroke-width="1" />
-          <g id="compassTicks" stroke="#aaa" stroke-width="1"></g>
-          <text x="0" y="-48" text-anchor="middle" dominant-baseline="middle" font-size="12" font-weight="700" fill="#444">N</text>
-          <text x="48" y="0" text-anchor="middle" dominant-baseline="middle" font-size="12" font-weight="700" fill="#444">E</text>
-          <text x="0" y="48" text-anchor="middle" dominant-baseline="middle" font-size="12" font-weight="700" fill="#444">S</text>
-          <text x="-48" y="0" text-anchor="middle" dominant-baseline="middle" font-size="12" font-weight="700" fill="#444">W</text>
-          <line id="windArrow" x1="0" y1="0" x2="0" y2="0" stroke="#d9534f" stroke-width="2.5" marker-end="url(#arrowhead)" />
-          <circle cx="0" cy="0" r="2.5" fill="#555" />
-        </svg>
+    <div class="row">
+      <div class="field">
+        <label for="gr">Glide ratio</label>
+        <input id="gr" type="number" value="7" min="1" step="0.5" />
       </div>
-      <input id="windDir" type="number" value="270" min="0" max="360" step="5" />
-      <small>Click/drag the rose or type. 0 = N, 90 = E, 180 = S, 270 = W.</small>
+      <div class="field">
+        <label for="airspeed">Airspeed km/h</label>
+        <input id="airspeed" type="number" value="37" min="10" step="1" />
+      </div>
     </div>
 
-    <button id="clear" class="secondary">Clear</button>
+    <div class="field">
+      <label for="windSpeed">Wind km/h (from dir)</label>
+      <div class="input-row">
+        <input id="windSpeed" type="number" value="15" min="0" step="1" />
+        <input id="windDir" type="number" value="270" min="0" max="360" step="5" />
+      </div>
+    </div>
+
+    <div class="compass-wrap">
+      <svg id="compass" viewBox="-80 -80 160 160" width="110" height="110" aria-label="Wind direction compass">
+        <defs>
+          <marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#d9534f" />
+          </marker>
+        </defs>
+        <circle cx="0" cy="0" r="62" fill="white" stroke="#c9c9cf" stroke-width="1" />
+        <g id="compassTicks" stroke="#aaa" stroke-width="1"></g>
+        <text x="0" y="-48" text-anchor="middle" dominant-baseline="middle" font-size="12" font-weight="700" fill="#444">N</text>
+        <text x="48" y="0" text-anchor="middle" dominant-baseline="middle" font-size="12" font-weight="700" fill="#444">E</text>
+        <text x="0" y="48" text-anchor="middle" dominant-baseline="middle" font-size="12" font-weight="700" fill="#444">S</text>
+        <text x="-48" y="0" text-anchor="middle" dominant-baseline="middle" font-size="12" font-weight="700" fill="#444">W</text>
+        <line id="windArrow" x1="0" y1="0" x2="0" y2="0" stroke="#d9534f" stroke-width="2.5" marker-end="url(#arrowhead)" />
+        <circle cx="0" cy="0" r="2.5" fill="#555" />
+      </svg>
+    </div>
 
     <div id="status" class="status"></div>
 
     <footer>
-      <p>Base map: © OpenStreetMap, © CARTO. Terrain: AWS Terrain Tiles (SRTM etc.).</p>
-      <p>Elevation: AWS Terrain Tiles (~30 m). This is a rough estimator — real flight planning needs real tools.</p>
+      <p>© <a href="https://www.openstreetmap.org/copyright">OSM</a>, <a href="https://openfreemap.org">OpenFreeMap</a>, AWS Terrain Tiles. Rough estimator — not a flight planner.</p>
     </footer>
   </aside>
 

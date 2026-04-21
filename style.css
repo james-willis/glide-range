@@ -13,53 +13,43 @@ body {
 }
 
 #sidebar {
-  width: 320px;
-  flex: 0 0 320px;
-  padding: 20px;
+  width: 260px;
+  flex: 0 0 260px;
+  padding: 14px 16px;
   background: #f7f7f8;
   border-right: 1px solid #d9d9dc;
   overflow-y: auto;
   height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 
 #sidebar h1 {
-  font-size: 20px;
-  margin: 0 0 4px;
+  font-size: 16px;
+  margin: 0 0 12px;
   font-weight: 600;
-}
-
-#sidebar .intro {
-  font-size: 13px;
-  color: #555;
-  margin: 0 0 20px;
+  letter-spacing: -0.01em;
 }
 
 .field {
-  margin-bottom: 14px;
+  margin-bottom: 10px;
 }
 
 .field label {
   display: block;
-  font-size: 12px;
+  font-size: 10px;
   font-weight: 600;
-  color: #333;
-  margin-bottom: 4px;
+  color: #555;
+  margin-bottom: 3px;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
 }
 
-.field input {
-  width: 100%;
-  padding: 8px 10px;
-  font-size: 14px;
-  border: 1px solid #c9c9cf;
-  border-radius: 4px;
-  background: white;
-}
-
+.field input,
 .field select {
-  padding: 8px 8px;
-  font-size: 14px;
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 13px;
   border: 1px solid #c9c9cf;
   border-radius: 4px;
   background: white;
@@ -67,22 +57,31 @@ body {
 
 .input-row {
   display: flex;
-  gap: 6px;
+  gap: 4px;
 }
+.input-row input { flex: 1; min-width: 0; }
 
-.input-row input { flex: 1; }
+.row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.row .field {
+  flex: 1;
+  margin-bottom: 0;
+}
 
 .field input[type="range"] {
   width: 100%;
   padding: 0;
-  margin-top: 8px;
+  margin-top: 5px;
   accent-color: #0a7e8c;
 }
 
 .compass-wrap {
   display: flex;
   justify-content: center;
-  margin: 4px 0 8px;
+  margin: 2px 0 10px;
 }
 
 #compass {
@@ -91,58 +90,33 @@ body {
   user-select: none;
 }
 
-.field small {
-  display: block;
-  color: #777;
-  font-size: 11px;
-  margin-top: 3px;
-}
-
 .readout {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 13px;
+  font-size: 12px;
   color: #333;
-  padding: 8px 10px;
+  padding: 5px 8px;
   background: #ececee;
   border-radius: 4px;
 }
 
-button {
-  width: 100%;
-  padding: 10px;
-  font-size: 14px;
-  font-weight: 600;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  margin-bottom: 8px;
-}
-
-button.secondary {
-  background: transparent;
-  color: #555;
-  border: 1px solid #c9c9cf;
-}
-
-button.secondary:hover { background: #ececee; }
-
 .status {
-  margin-top: 10px;
-  font-size: 12px;
-  color: #555;
-  min-height: 18px;
+  font-size: 11px;
+  color: #a94442;
+  min-height: 14px;
+  margin-top: 6px;
 }
 
 #sidebar footer {
-  margin-top: 30px;
-  font-size: 11px;
+  margin-top: auto;
+  padding-top: 10px;
+  font-size: 10px;
   color: #888;
   line-height: 1.4;
   border-top: 1px solid #ddd;
-  padding-top: 12px;
 }
 
-#sidebar footer p { margin: 0 0 6px; }
+#sidebar footer p { margin: 0; }
+#sidebar footer a { color: #888; }
 
 #map {
   flex: 1;
