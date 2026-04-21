@@ -32,10 +32,54 @@ map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-right');
 
 let pinMarker = null;
 let pinLngLat = null;
+let lastCompute = null; // stored for click-to-query AGL
 
-map.on('click', (e) => {
+// AGL bands (metres). Red = barely make it; green = plenty of altitude.
+const AGL_THRESHOLDS = [0, 200, 500, 1000, 1500, 2500, 4000];
+const AGL_COLORS = [
+  '#d73027', // 0–200 m AGL    red
+  '#fc8d59', // 200–500        orange
+  '#fee08b', // 500–1000       yellow
+  '#d9ef8b', // 1000–1500      yellow-green
+  '#91cf60', // 1500–2500      light green
+  '#1a9850', // 2500–4000      green
+  '#006837', // 4000+          deep green
+];
+
+map.on('click', handleMapClick);
+
+function handleMapClick(e) {
+  // If the click landed on a reachable-region fill, show AGL instead of moving the pin.
+  if (lastCompute) {
+    const layerIds = AGL_THRESHOLDS.map((_, i) => `glide-fill-${i}`);
+    const hits = map.queryRenderedFeatures(e.point, { layers: layerIds });
+    if (hits.length > 0) {
+      showAglPopup(e);
+      return;
+    }
+  }
   setPin(e.lngLat);
-});
+}
+
+function showAglPopup(e) {
+  const { field, nx, ny, n, lat: pLat, lng: pLng, cellM, degPerMLat, degPerMLng } = lastCompute;
+  const dE = (e.lngLat.lng - pLng) / degPerMLng;
+  const dN = (e.lngLat.lat - pLat) / degPerMLat;
+  const i = Math.round(n + dE / cellM);
+  const j = Math.round(n + dN / cellM);
+  if (i < 0 || i >= nx || j < 0 || j >= ny) return;
+  const agl = field[j * nx + i];
+  if (agl < 0) return;
+  const unit = document.getElementById('heightUnit').value;
+  const text =
+    unit === 'ft'
+      ? `${(agl / 0.3048).toFixed(0)} ft AGL`
+      : `${agl.toFixed(0)} m AGL`;
+  new maplibregl.Popup({ closeButton: false, closeOnClick: true })
+    .setLngLat(e.lngLat)
+    .setHTML(`<strong>${text}</strong>`)
+    .addTo(map);
+}
 
 function setPin(lngLat) {
   if (pinMarker) pinMarker.remove();
@@ -63,17 +107,25 @@ map.on('load', () => {
     type: 'geojson',
     data: { type: 'FeatureCollection', features: [] },
   });
-  map.addLayer({
-    id: 'glide-fill',
-    type: 'fill',
-    source: 'glide',
-    paint: { 'fill-color': '#00bcd4', 'fill-opacity': 0.3 },
-  });
+  // One fill per AGL band, coloured by level. Each cell belongs to exactly
+  // one band (polygons are constructed as isobands with holes), so the paint
+  // is opaque-looking without alpha compounding across layers.
+  for (let i = 0; i < AGL_THRESHOLDS.length; i++) {
+    map.addLayer({
+      id: `glide-fill-${i}`,
+      type: 'fill',
+      source: 'glide',
+      filter: ['==', ['get', 'level'], i],
+      paint: { 'fill-color': AGL_COLORS[i], 'fill-opacity': 0.45 },
+    });
+  }
+  // Outer boundary only (level 0 = the whole reachable region's outer edge).
   map.addLayer({
     id: 'glide-line',
     type: 'line',
     source: 'glide',
-    paint: { 'line-color': '#006d77', 'line-width': 2 },
+    filter: ['==', ['get', 'level'], 0],
+    paint: { 'line-color': '#333', 'line-width': 1.5 },
   });
   applyUrlState();
 });
@@ -381,6 +433,16 @@ async function compute() {
   }
   if (myToken !== computeToken) return;
   map.getSource('glide').setData(primary.geojson);
+  lastCompute = {
+    field: primary.field,
+    nx: primary.nx,
+    ny: primary.ny,
+    n: primary.n,
+    cellM: primary.cellM,
+    degPerMLat: primary.degPerMLat,
+    degPerMLng: primary.degPerMLng,
+    lat, lng,
+  };
 
   const t = primary.timings;
   setStatus(
@@ -442,31 +504,68 @@ function runFlood(ctx, cellM) {
     field[k] = result[k] < -1e8 ? -1 : result[k] - terrain[k];
   }
 
-  const contourResult = d3.contours().size([nx, ny]).thresholds([0])(field);
-  const mp = contourResult[0];
-
-  const coords = mp.coordinates.map((polygon) =>
-    polygon.map((ring) =>
-      ring.map(([i, j]) => [
-        lng + (i - n) * cellM * degPerMLng,
-        lat + (j - n) * cellM * degPerMLat,
-      ]),
-    ),
+  // d3 contour at each AGL threshold. Each returned MultiPolygon is the set of
+  // cells where field >= threshold. We build isobands by using contour[i]'s
+  // outer rings as fill shells, with contour[i+1]'s outer rings added as
+  // holes (a cell with AGL >= t_{i+1} "punches through" band i into band i+1).
+  const contourGen = d3.contours().size([nx, ny]);
+  const perThreshold = AGL_THRESHOLDS.map((t) =>
+    contourGen.thresholds([t])(field)[0],
   );
+
+  const toLngLat = ([i, j]) => [
+    lng + (i - n) * cellM * degPerMLng,
+    lat + (j - n) * cellM * degPerMLat,
+  ];
+
+  const features = [];
+  for (let level = 0; level < AGL_THRESHOLDS.length; level++) {
+    const outer = perThreshold[level];
+    const inner = perThreshold[level + 1]; // undefined for top band
+    const bandPolys = [];
+    for (const poly of outer.coordinates) {
+      // poly = [outerRing, ...d3-own-holes (unreachable islands at this level)]
+      const rings = poly.slice();
+      if (inner) {
+        for (const innerPoly of inner.coordinates) {
+          // If an inner-contour's outer ring sits inside this outer ring,
+          // it's a region of higher AGL and becomes a hole in this band.
+          const testPt = innerPoly[0][0];
+          if (pointInRing(testPt[0], testPt[1], poly[0])) {
+            rings.push(innerPoly[0]);
+          }
+        }
+      }
+      bandPolys.push(rings.map((r) => r.map(toLngLat)));
+    }
+    if (bandPolys.length === 0) continue;
+    features.push({
+      type: 'Feature',
+      geometry: { type: 'MultiPolygon', coordinates: bandPolys },
+      properties: { level, aglMin: AGL_THRESHOLDS[level] },
+    });
+  }
   const t3 = performance.now();
 
   return {
-    geojson: {
-      type: 'FeatureCollection',
-      features: [{
-        type: 'Feature',
-        geometry: { type: 'MultiPolygon', coordinates: coords },
-        properties: {},
-      }],
-    },
-    nx, ny, polyCount: coords.length,
+    geojson: { type: 'FeatureCollection', features },
+    field, nx, ny, n, cellM, degPerMLat, degPerMLng,
+    polyCount: features.length,
     timings: { terrain: t1 - t0, gpu: t2 - t1, contour: t3 - t2 },
   };
+}
+
+function pointInRing(x, y, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0], yi = ring[i][1];
+    const xj = ring[j][0], yj = ring[j][1];
+    if (((yi > y) !== (yj > y)) &&
+        (x < ((xj - xi) * (y - yi)) / (yj - yi) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
 }
 
 function clearPolygon() {
@@ -479,6 +578,7 @@ function clearPolygon() {
     pinLngLat = null;
     document.getElementById('coords').textContent = '(not set — click map)';
   }
+  lastCompute = null;
   setStatus('');
   scheduleUrlWrite();
 }
