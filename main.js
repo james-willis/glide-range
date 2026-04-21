@@ -224,16 +224,16 @@ async function compute() {
     return;
   }
   const myToken = ++computeToken;
-  const heightRaw = parseFloat(document.getElementById('height').value);
-  const heightUnit = document.getElementById('heightUnit').value;
-  const heightAGL = heightUnit === 'ft' ? heightRaw * 0.3048 : heightRaw;
+  const altRaw = parseFloat(document.getElementById('height').value);
+  const altUnit = document.getElementById('heightUnit').value;
+  const altMSL = altUnit === 'ft' ? altRaw * 0.3048 : altRaw;
   const GR = parseFloat(document.getElementById('gr').value);
   const V = parseFloat(document.getElementById('airspeed').value) / 3.6; // m/s
   const W = parseFloat(document.getElementById('windSpeed').value) / 3.6; // m/s
   const windFromDeg = parseFloat(document.getElementById('windDir').value);
 
-  if (!(heightAGL > 0) || !(GR > 0) || !(V > 0)) {
-    setStatus('Check height, glide ratio, and airspeed — must be > 0.');
+  if (!(altMSL > 0) || !(GR > 0) || !(V > 0)) {
+    setStatus('Check altitude, glide ratio, and airspeed — must be > 0.');
     return;
   }
 
@@ -246,25 +246,40 @@ async function compute() {
   const Wx = W * Math.sin(windToRad); // east
   const Wy = W * Math.cos(windToRad); // north
 
-  // Worst-case tailwind range for bounds estimate.
-  const maxRange = Math.min(
-    MAX_RAY_M,
-    heightAGL * GR * (1 + W / V) * 1.15 + 500,
-  );
-
   const { lat, lng } = pinLngLat;
-  const bounds = boundsAround(lat, lng, maxRange);
-  await preloadTilesForBounds(bounds);
 
-  if (myToken !== computeToken) return; // a newer compute has started
-
+  // Need terrain under the pin first, to size the range estimate and
+  // sanity-check that the pilot is airborne.
+  await preloadTilesForBounds(boundsAround(lat, lng, 500));
+  if (myToken !== computeToken) return;
   const baseElev = elevationAt(lat, lng);
   if (baseElev === null) {
     setStatus('Terrain tile missing — try again.');
     btn.disabled = false;
     return;
   }
-  const startAbsAlt = baseElev + heightAGL;
+  const heightAboveLaunch = altMSL - baseElev;
+  if (heightAboveLaunch <= 0) {
+    setStatus(
+      `Altitude ${altMSL.toFixed(0)} m MSL is below terrain at pin (${baseElev.toFixed(0)} m) — you're on the ground.`,
+    );
+    map.getSource('glide').setData({ type: 'FeatureCollection', features: [] });
+    btn.disabled = false;
+    return;
+  }
+
+  // Worst-case tailwind range for bounds estimate.
+  const maxRange = Math.min(
+    MAX_RAY_M,
+    heightAboveLaunch * GR * (1 + W / V) * 1.15 + 500,
+  );
+
+  const bounds = boundsAround(lat, lng, maxRange);
+  await preloadTilesForBounds(bounds);
+
+  if (myToken !== computeToken) return; // a newer compute has started
+
+  const startAbsAlt = altMSL;
 
   setStatus('Tracing rays…');
   // Yield to the UI once before the sync compute.

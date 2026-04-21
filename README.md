@@ -7,7 +7,7 @@ Interactive map that shows where a paraglider pilot can actually glide to, given
 ## Usage
 
 1. Click the map to drop a launch pin (drag to reposition).
-2. Enter height above launch (m AGL), glide ratio, trim airspeed, wind speed (km/h), and wind direction (° *from*, meteorological).
+2. Enter your current altitude MSL (m or ft), glide ratio, trim airspeed, wind speed (km/h), and wind direction (° *from*, meteorological).
 3. Press **Compute glide range**. The shaded polygon is the reachable area.
 
 ## How it works
