@@ -75,6 +75,12 @@ map.on('load', () => {
     source: 'glide',
     paint: { 'line-color': '#006d77', 'line-width': 2 },
   });
+  applyUrlState();
+});
+
+// Persist map pan/zoom in the URL too, after any user-initiated move.
+map.on('moveend', (e) => {
+  if (e.originalEvent) scheduleUrlWrite();
 });
 
 // --- terrain: Nextzen terrarium tiles --------------------------------------
@@ -219,6 +225,81 @@ function scheduleCompute(delayMs = 300) {
     debounceHandle = null;
     if (pinLngLat) compute();
   }, delayMs);
+  scheduleUrlWrite();
+}
+
+// --- URL state -------------------------------------------------------------
+
+let urlWriteTimer = null;
+
+function scheduleUrlWrite() {
+  if (urlWriteTimer) clearTimeout(urlWriteTimer);
+  urlWriteTimer = setTimeout(writeUrl, 250);
+}
+
+function writeUrl() {
+  const parts = [];
+  if (pinLngLat) {
+    parts.push(`pin=${pinLngLat.lat.toFixed(5)},${pinLngLat.lng.toFixed(5)}`);
+  }
+  parts.push(`alt=${document.getElementById('height').value}`);
+  parts.push(`au=${document.getElementById('heightUnit').value}`);
+  parts.push(`gr=${document.getElementById('gr').value}`);
+  parts.push(`as=${document.getElementById('airspeed').value}`);
+  parts.push(`ws=${document.getElementById('windSpeed').value}`);
+  parts.push(`wd=${document.getElementById('windDir').value}`);
+  const c = map.getCenter();
+  parts.push(`c=${c.lat.toFixed(4)},${c.lng.toFixed(4)}`);
+  parts.push(`z=${map.getZoom().toFixed(2)}`);
+  history.replaceState(null, '', '#' + parts.join('&'));
+}
+
+function readUrl() {
+  const raw = window.location.hash.replace(/^#/, '');
+  if (!raw) return null;
+  const state = {};
+  for (const seg of raw.split('&')) {
+    const eq = seg.indexOf('=');
+    if (eq < 0) continue;
+    state[seg.slice(0, eq)] = decodeURIComponent(seg.slice(eq + 1));
+  }
+  return state;
+}
+
+function applyUrlState() {
+  const s = readUrl();
+  if (!s) return;
+
+  const setIfValid = (id, v) => {
+    if (v !== undefined && v !== '') document.getElementById(id).value = v;
+  };
+  setIfValid('height', s.alt);
+  setIfValid('heightUnit', s.au);
+  setIfValid('gr', s.gr);
+  setIfValid('airspeed', s.as);
+  setIfValid('windSpeed', s.ws);
+  setIfValid('windDir', s.wd);
+
+  // Nudge the compass arrow to match wd.
+  if (s.wd !== undefined) {
+    const ev = new Event('input', { bubbles: true });
+    document.getElementById('windDir').dispatchEvent(ev);
+  }
+
+  if (s.c) {
+    const [lat, lng] = s.c.split(',').map(parseFloat);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      const zoom = s.z ? parseFloat(s.z) : map.getZoom();
+      map.jumpTo({ center: [lng, lat], zoom: Number.isFinite(zoom) ? zoom : map.getZoom() });
+    }
+  }
+
+  if (s.pin) {
+    const [lat, lng] = s.pin.split(',').map(parseFloat);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      setPin({ lng, lat });
+    }
+  }
 }
 
 async function compute() {
@@ -381,6 +462,7 @@ function clearPolygon() {
     document.getElementById('coords').textContent = '(not set — click map)';
   }
   setStatus('');
+  scheduleUrlWrite();
 }
 
 document.getElementById('clear').addEventListener('click', clearPolygon);
