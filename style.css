@@ -27,9 +27,10 @@ body {
 
 body.sidebar-hidden #sidebar {
   width: 0;
+  height: 0;
   flex: 0 0 0;
-  padding-left: 0;
-  padding-right: 0;
+  padding: 0;
+  border: 0;
   overflow: hidden;
 }
 
@@ -168,6 +169,7 @@ body.sidebar-hidden #sidebar-toggle { left: 10px; }
   body { flex-direction: column; }
   #sidebar { width: 100%; flex: 0 0 auto; height: auto; border-right: none; border-bottom: 1px solid #d9d9dc; }
   #map { height: 60vh; }
+  body.sidebar-hidden #map { height: 100vh; }
   #sidebar-toggle,
   body.sidebar-hidden #sidebar-toggle {
     left: auto;
