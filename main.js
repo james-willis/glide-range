@@ -34,51 +34,68 @@ let pinMarker = null;
 let pinLngLat = null;
 let lastCompute = null; // stored for click-to-query AGL
 
-// AGL bands (metres). Red = barely make it; green = plenty of altitude.
-const AGL_THRESHOLDS = [0, 200, 500, 1000, 1500, 2500, 4000];
-const AGL_COLORS = [
-  '#d73027', // 0–200 m AGL    red
-  '#fc8d59', // 200–500        orange
-  '#fee08b', // 500–1000       yellow
-  '#d9ef8b', // 1000–1500      yellow-green
-  '#91cf60', // 1500–2500      light green
-  '#1a9850', // 2500–4000      green
-  '#006837', // 4000+          deep green
+// AGL beyond this caps at the deepest-green colour. Gives good dynamic range
+// for typical paragliding scenarios without washing everything out at 18k ft.
+const MAX_AGL_M = 2500;
+
+// Smooth RdYlGn ramp: red = barely, green = plenty. Built at module load into
+// a 256-entry LUT for O(1) pixel-time lookup.
+const RAMP_STOPS = [
+  [0.00, 165,   0,  38],
+  [0.10, 215,  48,  39],
+  [0.25, 244, 109,  67],
+  [0.45, 254, 224, 139],
+  [0.50, 255, 255, 191],
+  [0.55, 217, 239, 139],
+  [0.75, 102, 189,  99],
+  [0.90,  26, 152,  80],
+  [1.00,   0, 104,  55],
 ];
+const COLOR_RAMP = (() => {
+  const n = 256;
+  const lut = new Uint8Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1);
+    let a = 0;
+    while (a < RAMP_STOPS.length - 1 && RAMP_STOPS[a + 1][0] < t) a++;
+    const s0 = RAMP_STOPS[a];
+    const s1 = RAMP_STOPS[Math.min(RAMP_STOPS.length - 1, a + 1)];
+    const lt = (t - s0[0]) / Math.max(1e-9, s1[0] - s0[0]);
+    lut[i * 3 + 0] = Math.round(s0[1] + (s1[1] - s0[1]) * lt);
+    lut[i * 3 + 1] = Math.round(s0[2] + (s1[2] - s0[2]) * lt);
+    lut[i * 3 + 2] = Math.round(s0[3] + (s1[3] - s0[3]) * lt);
+  }
+  return lut;
+})();
 
 map.on('click', handleMapClick);
 
-function handleMapClick(e) {
-  // If the click landed on a reachable-region fill, show AGL instead of moving the pin.
-  if (lastCompute) {
-    const layerIds = AGL_THRESHOLDS.map((_, i) => `glide-fill-${i}`);
-    const hits = map.queryRenderedFeatures(e.point, { layers: layerIds });
-    if (hits.length > 0) {
-      showAglPopup(e);
-      return;
-    }
-  }
-  setPin(e.lngLat);
-}
-
-function showAglPopup(e) {
+function aglAt(lngLat) {
+  if (!lastCompute) return null;
   const { field, nx, ny, n, lat: pLat, lng: pLng, cellM, degPerMLat, degPerMLng } = lastCompute;
-  const dE = (e.lngLat.lng - pLng) / degPerMLng;
-  const dN = (e.lngLat.lat - pLat) / degPerMLat;
+  const dE = (lngLat.lng - pLng) / degPerMLng;
+  const dN = (lngLat.lat - pLat) / degPerMLat;
   const i = Math.round(n + dE / cellM);
   const j = Math.round(n + dN / cellM);
-  if (i < 0 || i >= nx || j < 0 || j >= ny) return;
+  if (i < 0 || i >= nx || j < 0 || j >= ny) return null;
   const agl = field[j * nx + i];
-  if (agl < 0) return;
-  const unit = document.getElementById('heightUnit').value;
-  const text =
-    unit === 'ft'
+  return agl >= 0 ? agl : null;
+}
+
+function handleMapClick(e) {
+  const agl = aglAt(e.lngLat);
+  if (agl != null) {
+    const unit = document.getElementById('heightUnit').value;
+    const text = unit === 'ft'
       ? `${(agl / 0.3048).toFixed(0)} ft AGL`
       : `${agl.toFixed(0)} m AGL`;
-  new maplibregl.Popup({ closeButton: false, closeOnClick: true })
-    .setLngLat(e.lngLat)
-    .setHTML(`<strong>${text}</strong>`)
-    .addTo(map);
+    new maplibregl.Popup({ closeButton: false, closeOnClick: true })
+      .setLngLat(e.lngLat)
+      .setHTML(`<strong>${text}</strong>`)
+      .addTo(map);
+    return;
+  }
+  setPin(e.lngLat);
 }
 
 function setPin(lngLat) {
@@ -107,21 +124,28 @@ map.on('load', () => {
     type: 'geojson',
     data: { type: 'FeatureCollection', features: [] },
   });
-  // One fill per AGL band, coloured by level. Each cell belongs to exactly
-  // one band (polygons are constructed as isobands with holes), so the paint
-  // is opaque-looking without alpha compounding across layers.
-  for (let i = 0; i < AGL_THRESHOLDS.length; i++) {
-    map.addLayer({
-      id: `glide-fill-${i}`,
-      type: 'fill',
-      source: 'glide',
-      filter: ['==', ['get', 'level'], i],
-      paint: { 'fill-color': AGL_COLORS[i], 'fill-opacity': 0.45 },
-    });
-  }
-  // Black outline around the true outer edge of reachability only. Drawn from
-  // a dedicated "outline" feature so we don't also trace the inner band
-  // transitions.
+  // Continuous AGL colouring via a raster image. One pixel per grid cell;
+  // colours come from the RdYlGn LUT. Bilinear resampling keeps it smooth at
+  // zoom-in.
+  const PLACEHOLDER_PNG =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgAAIAAAUAAarVyFEAAAAASUVORK5CYII=';
+  map.addSource('glide-raster', {
+    type: 'image',
+    url: PLACEHOLDER_PNG,
+    coordinates: [[-1, 1], [1, 1], [1, -1], [-1, -1]],
+  });
+  map.addLayer({
+    id: 'glide-raster-layer',
+    type: 'raster',
+    source: 'glide-raster',
+    paint: {
+      'raster-opacity': 0.55,
+      'raster-fade-duration': 0,
+      'raster-resampling': 'linear',
+    },
+  });
+  // Black outline around the outer edge of reachability (and any unreachable
+  // island holes, which are also reachability boundaries).
   map.addLayer({
     id: 'glide-line',
     type: 'line',
@@ -435,6 +459,10 @@ async function compute() {
   }
   if (myToken !== computeToken) return;
   map.getSource('glide').setData(primary.geojson);
+  map.getSource('glide-raster').updateImage({
+    data: primary.raster.image,
+    coordinates: primary.raster.coordinates,
+  });
   lastCompute = {
     field: primary.field,
     nx: primary.nx,
@@ -506,87 +534,78 @@ async function runFlood(ctx, cellM) {
     field[k] = result[k] < -1e8 ? -1 : result[k] - terrain[k];
   }
 
-  // d3 contour at each AGL threshold. Each returned MultiPolygon is the set of
-  // cells where field >= threshold. We build isobands by using contour[i]'s
-  // outer rings as fill shells, with contour[i+1]'s outer rings added as
-  // holes (a cell with AGL >= t_{i+1} "punches through" band i into band i+1).
-  const contourGen = d3.contours().size([nx, ny]);
-  const perThreshold = AGL_THRESHOLDS.map((t) =>
-    contourGen.thresholds([t])(field)[0],
-  );
+  // Rasterise the AGL field: one pixel per grid cell, colour from the LUT.
+  // Image row 0 is north (top) but grid j=0 is south, so flip Y on write.
+  const img = new ImageData(nx, ny);
+  for (let j = 0; j < ny; j++) {
+    const row = ny - 1 - j;
+    for (let i = 0; i < nx; i++) {
+      const agl = field[j * nx + i];
+      const pIdx = (row * nx + i) * 4;
+      if (agl < 0) {
+        img.data[pIdx + 3] = 0;
+      } else {
+        const t = Math.min(1, agl / MAX_AGL_M);
+        const rIdx = Math.min(255, Math.floor(t * 255)) * 3;
+        img.data[pIdx + 0] = COLOR_RAMP[rIdx];
+        img.data[pIdx + 1] = COLOR_RAMP[rIdx + 1];
+        img.data[pIdx + 2] = COLOR_RAMP[rIdx + 2];
+        img.data[pIdx + 3] = 255;
+      }
+    }
+  }
 
+  // Geographic corners of the grid, north-west / north-east / south-east /
+  // south-west (MapLibre image-source order).
+  const westLng = lng + (-n) * cellM * degPerMLng;
+  const eastLng = lng + (n) * cellM * degPerMLng;
+  const northLat = lat + (n) * cellM * degPerMLat;
+  const southLat = lat + (-n) * cellM * degPerMLat;
+  const coordinates = [
+    [westLng, northLat],
+    [eastLng, northLat],
+    [eastLng, southLat],
+    [westLng, southLat],
+  ];
+
+  // Outline (just the outer boundary of reachability) — built from a single
+  // d3.contours call at threshold 0.
   const toLngLat = ([i, j]) => [
     lng + (i - n) * cellM * degPerMLng,
     lat + (j - n) * cellM * degPerMLat,
   ];
-
-  const features = [];
-  for (let level = 0; level < AGL_THRESHOLDS.length; level++) {
-    const outer = perThreshold[level];
-    const inner = perThreshold[level + 1]; // undefined for top band
-    const bandPolys = [];
-    for (const poly of outer.coordinates) {
-      // poly = [outerRing, ...d3-own-holes (unreachable islands at this level)]
-      const rings = poly.slice();
-      if (inner) {
-        for (const innerPoly of inner.coordinates) {
-          // If an inner-contour's outer ring sits inside this outer ring,
-          // it's a region of higher AGL and becomes a hole in this band.
-          const testPt = innerPoly[0][0];
-          if (pointInRing(testPt[0], testPt[1], poly[0])) {
-            rings.push(innerPoly[0]);
-          }
-        }
-      }
-      bandPolys.push(rings.map((r) => r.map(toLngLat)));
-    }
-    if (bandPolys.length === 0) continue;
-    features.push({
-      type: 'Feature',
-      geometry: { type: 'MultiPolygon', coordinates: bandPolys },
-      properties: { level, aglMin: AGL_THRESHOLDS[level] },
-    });
-  }
-
-  // Outline feature: just contour[0] with its native unreachable-island holes.
-  // Any such holes also warrant a black line (those are reachability
-  // boundaries too — mountains poking up through the region).
-  const outlineCoords = perThreshold[0].coordinates.map((poly) =>
+  const outerContour = d3.contours().size([nx, ny]).thresholds([0])(field)[0];
+  const outlineCoords = outerContour.coordinates.map((poly) =>
     poly.map((ring) => ring.map(toLngLat)),
   );
-  if (outlineCoords.length > 0) {
-    features.push({
-      type: 'Feature',
-      geometry: { type: 'MultiPolygon', coordinates: outlineCoords },
-      properties: { outline: true },
-    });
-  }
+  const outlineFeatures = outlineCoords.length > 0
+    ? [{
+        type: 'Feature',
+        geometry: { type: 'MultiPolygon', coordinates: outlineCoords },
+        properties: { outline: true },
+      }]
+    : [];
   const t3 = performance.now();
 
   return {
-    geojson: { type: 'FeatureCollection', features },
+    geojson: { type: 'FeatureCollection', features: outlineFeatures },
+    raster: { image: img, coordinates },
     field, nx, ny, n, cellM, degPerMLat, degPerMLng,
-    polyCount: features.length,
+    polyCount: outlineCoords.length,
     timings: { terrain: t1 - t0, gpu: t2 - t1, contour: t3 - t2 },
   };
-}
-
-function pointInRing(x, y, ring) {
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const xi = ring[i][0], yi = ring[i][1];
-    const xj = ring[j][0], yj = ring[j][1];
-    if (((yi > y) !== (yj > y)) &&
-        (x < ((xj - xi) * (y - yi)) / (yj - yi) + xi)) {
-      inside = !inside;
-    }
-  }
-  return inside;
 }
 
 function clearPolygon() {
   if (map.getSource('glide')) {
     map.getSource('glide').setData({ type: 'FeatureCollection', features: [] });
+  }
+  if (map.getSource('glide-raster')) {
+    // Move the raster off-screen with a degenerate footprint so it's
+    // invisible until the next compute.
+    map.getSource('glide-raster').setCoordinates([
+      [-1, 1], [1, 1], [1, -1], [-1, -1],
+    ]);
   }
   if (pinMarker) {
     pinMarker.remove();
