@@ -123,6 +123,14 @@ body {
   height: 100vh;
 }
 
+.hover-readout {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 600;
+  color: #222;
+}
+
 @media (max-width: 700px) {
   body { flex-direction: column; }
   #sidebar { width: 100%; flex: 0 0 auto; height: auto; border-right: none; border-bottom: 1px solid #d9d9dc; }

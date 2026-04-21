@@ -52,16 +52,18 @@ const COLOR_RAMP = (() => {
 
 map.on('click', handleMapClick);
 
-function aglAt(lngLat) {
+function sampleAt(lngLat) {
   if (!lastCompute) return null;
-  const { field, nx, ny, n, lat: pLat, lng: pLng, cellM, degPerMLat, degPerMLng } = lastCompute;
+  const { field, terrain, nx, ny, n, lat: pLat, lng: pLng, cellM, degPerMLat, degPerMLng } = lastCompute;
   const dE = (lngLat.lng - pLng) / degPerMLng;
   const dN = (lngLat.lat - pLat) / degPerMLat;
   const i = Math.round(n + dE / cellM);
   const j = Math.round(n + dN / cellM);
   if (i < 0 || i >= nx || j < 0 || j >= ny) return null;
   const agl = field[j * nx + i];
-  return agl >= 0 ? agl : null;
+  if (agl < 0) return null;
+  const ground = terrain[j * nx + i];
+  return { agl, msl: ground + agl };
 }
 
 // Rolling queue of in-flight blob URLs. MapLibre fetches URLs asynchronously,
@@ -99,19 +101,17 @@ const hoverPopup = new maplibregl.Popup({
 });
 
 function handleMapMouseMove(e) {
-  const agl = aglAt(e.lngLat);
-  if (agl == null) {
+  const s = sampleAt(e.lngLat);
+  if (s == null) {
     hoverPopup.remove();
     map.getCanvas().style.cursor = '';
     return;
   }
   const unit = document.getElementById('heightUnit').value;
-  const text = unit === 'ft'
-    ? `${(agl / 0.3048).toFixed(0)} ft AGL`
-    : `${agl.toFixed(0)} m AGL`;
+  const fmt = (m) => unit === 'ft' ? `${(m / 0.3048).toFixed(0)} ft` : `${m.toFixed(0)} m`;
   hoverPopup
     .setLngLat(e.lngLat)
-    .setHTML(`<strong>${text}</strong>`)
+    .setHTML(`<div class="hover-readout">${fmt(s.msl)} MSL<br/>${fmt(s.agl)} AGL</div>`)
     .addTo(map);
   map.getCanvas().style.cursor = 'crosshair';
 }
@@ -504,6 +504,7 @@ async function compute() {
   if (myToken !== computeToken) return;
   lastCompute = {
     field: primary.field,
+    terrain: primary.terrain,
     nx: primary.nx,
     ny: primary.ny,
     n: primary.n,
@@ -628,7 +629,8 @@ async function runFlood(ctx, cellM) {
 
   return {
     raster: { image: img, coordinates },
-    field, nx, ny, n, cellM, degPerMLat, degPerMLng,
+    field, terrain: terrainArr,
+    nx, ny, n, cellM, degPerMLat, degPerMLng,
     iterations, actualIters,
     timings: { terrain: t1 - t0, gpu: t2 - t1, contour: t3 - t2 },
   };
