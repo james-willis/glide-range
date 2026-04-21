@@ -23,7 +23,7 @@ const map = new maplibregl.Map({
     },
     layers: [{ id: 'otm', type: 'raster', source: 'otm' }],
   },
-  center: [-122.0306, 47.5133], // Chirico LZ, Tiger Mountain (Poo Poo Point)
+  center: [-122.0306, 47.5133], // Poo Poo Point LZ, Tiger Mountain
   zoom: 13,
 });
 
