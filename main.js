@@ -368,10 +368,13 @@ async function compute() {
     return;
   }
 
-  // Worst-case tailwind range, padded 25%, for grid sizing.
+  // Worst-case tailwind range for grid sizing. Uses altMSL (not AGL) as the
+  // altitude budget — the pilot can potentially descend to sea level if terrain
+  // drops away from the pin, which is exactly the case where undersizing the
+  // grid cuts off a real reachable region with a straight clipped edge.
   const maxRange = Math.min(
     MAX_RANGE_M,
-    heightAboveLaunch * GR * (1 + W / V) * 1.25 + 500,
+    altMSL * GR * (1 + W / V) * 1.25 + 500,
   );
 
   const bounds = boundsAround(lat, lng, maxRange);
