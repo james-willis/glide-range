@@ -532,14 +532,21 @@ async function runFlood(ctx, cellM) {
   const degPerMLat = 180 / Math.PI / EARTH_R;
   const degPerMLng = degPerMLat / cosLat;
 
-  const t0 = performance.now();
-  const terrain = new Float32Array(nx * ny);
-  for (let j = 0; j < ny; j++) {
-    const latJ = lat + (j - n) * cellM * degPerMLat;
-    for (let i = 0; i < nx; i++) {
-      const lngI = lng + (i - n) * cellM * degPerMLng;
-      const e = elevationAt(latJ, lngI);
-      terrain[j * nx + i] = e === null || Number.isNaN(e) ? 99999 : e;
+  // Tile coverage for the grid bbox (same arithmetic as preloadTilesForBounds).
+  const halfDegLat = n * cellM * degPerMLat;
+  const halfDegLng = n * cellM * degPerMLng;
+  const tileX0 = Math.floor(lng2tileX(lng - halfDegLng, TILE_ZOOM));
+  const tileXend = Math.floor(lng2tileX(lng + halfDegLng, TILE_ZOOM));
+  const tileY0 = Math.floor(lat2tileY(lat + halfDegLat, TILE_ZOOM));
+  const tileYend = Math.floor(lat2tileY(lat - halfDegLat, TILE_ZOOM));
+  const tiles = [];
+  for (let tx = tileX0; tx <= tileXend; tx++) {
+    for (let ty = tileY0; ty <= tileYend; ty++) {
+      tiles.push({
+        tileX: tx,
+        tileY: ty,
+        data: tileData.get(`${TILE_ZOOM}/${tx}/${ty}`) || null,
+      });
     }
   }
 
@@ -560,18 +567,33 @@ async function runFlood(ctx, cellM) {
     altLoss[k] = (dist * V) / (GR * G);
   }
 
-  const t1 = performance.now();
   if (!flooder) flooder = new GpuFlooder();
+
+  const t0 = performance.now();
+  const { terrainTex, terrainArr } = await flooder.bakeTerrain({
+    tiles,
+    tileX0, tileY0,
+    tileCountX: tileXend - tileX0 + 1,
+    tileCountY: tileYend - tileY0 + 1,
+    tileSize: TILE_SIZE,
+    nx, ny,
+    pinLat: lat, pinLng: lng,
+    cellM, n,
+    degPerMLat, degPerMLng,
+    pow2z: Math.pow(2, TILE_ZOOM),
+  });
+
+  const t1 = performance.now();
   const iterations = Math.ceil(n * 1.8 + 20);
   const { result, actualIters } = await flooder.flood({
-    nx, ny, terrain, altLoss,
+    nx, ny, terrainTex, altLoss,
     pinI: n, pinJ: n, altMSL, iterations,
   });
   const t2 = performance.now();
 
   const field = new Float32Array(nx * ny);
   for (let k = 0; k < nx * ny; k++) {
-    field[k] = result[k] < -1e8 ? -1 : result[k] - terrain[k];
+    field[k] = result[k] < -1e8 ? -1 : result[k] - terrainArr[k];
   }
 
   // Rasterise the AGL field: one pixel per grid cell, colour from the LUT.
@@ -853,6 +875,56 @@ void main() {
   outColor = texture(u_src, v_uv);
 }`;
 
+    // Terrain bake shader: project each output cell → global terrarium pixel
+    // coords → atlas sample → decode RGB to elevation.
+    const bakeFs = `#version 300 es
+precision highp float;
+uniform sampler2D u_atlas;
+uniform vec2 u_atlasSize;      // in pixels
+uniform vec2 u_atlasOriginPx;  // global terrarium pixel coords of atlas (0, 0)
+uniform vec2 u_pinLL;          // (lng, lat) of pin
+uniform vec2 u_degPerM;        // (degPerMLng, degPerMLat)
+uniform float u_cellM;
+uniform float u_n;             // half-grid size (nx = 2n+1)
+uniform vec2 u_gridSize;       // (nx, ny)
+uniform float u_pow2z;         // 2^TILE_ZOOM
+in vec2 v_uv;
+out vec4 outColor;
+
+const float TILE_SIZE = 256.0;
+const float DEG2RAD = 0.01745329;
+const float PI = 3.14159265;
+
+void main() {
+  // Cell indices (i, j), with j=0 = south matching our grid convention.
+  float i = floor(v_uv.x * u_gridSize.x);
+  float j = floor(v_uv.y * u_gridSize.y);
+  float dE = (i - u_n) * u_cellM;
+  float dN = (j - u_n) * u_cellM;
+  float lat = u_pinLL.y + dN * u_degPerM.y;
+  float lng = u_pinLL.x + dE * u_degPerM.x;
+
+  // Global terrarium pixel coords (z = TILE_ZOOM).
+  float gx = ((lng + 180.0) / 360.0) * u_pow2z * TILE_SIZE;
+  float latRad = lat * DEG2RAD;
+  float tileY = (1.0 - log(tan(latRad) + 1.0 / cos(latRad)) / PI) * 0.5 * u_pow2z;
+  float gy = tileY * TILE_SIZE;
+
+  vec2 atlasUV = (vec2(gx, gy) - u_atlasOriginPx) / u_atlasSize;
+
+  float elev;
+  if (atlasUV.x < 0.0 || atlasUV.x > 1.0 || atlasUV.y < 0.0 || atlasUV.y > 1.0) {
+    elev = 99999.0; // off-atlas = treat as impassable wall
+  } else {
+    vec4 texel = texture(u_atlas, atlasUV);
+    float r = texel.r * 255.0;
+    float g = texel.g * 255.0;
+    float b = texel.b * 255.0;
+    elev = r * 256.0 + g + b / 256.0 - 32768.0;
+  }
+  outColor = vec4(elev, 0.0, 0.0, 1.0);
+}`;
+
     this.prog = this._makeProgram(vs, fs);
     this.uLoss = gl.getUniformLocation(this.prog, 'u_loss');
     this.uTexel = gl.getUniformLocation(this.prog, 'u_texel');
@@ -861,6 +933,19 @@ void main() {
 
     this.copyProg = this._makeProgram(vs, copyFs);
     this.uCopySrc = gl.getUniformLocation(this.copyProg, 'u_src');
+
+    this.bakeProg = this._makeProgram(vs, bakeFs);
+    this.uBake = {
+      atlas: gl.getUniformLocation(this.bakeProg, 'u_atlas'),
+      atlasSize: gl.getUniformLocation(this.bakeProg, 'u_atlasSize'),
+      atlasOriginPx: gl.getUniformLocation(this.bakeProg, 'u_atlasOriginPx'),
+      pinLL: gl.getUniformLocation(this.bakeProg, 'u_pinLL'),
+      degPerM: gl.getUniformLocation(this.bakeProg, 'u_degPerM'),
+      cellM: gl.getUniformLocation(this.bakeProg, 'u_cellM'),
+      n: gl.getUniformLocation(this.bakeProg, 'u_n'),
+      gridSize: gl.getUniformLocation(this.bakeProg, 'u_gridSize'),
+      pow2z: gl.getUniformLocation(this.bakeProg, 'u_pow2z'),
+    };
 
     this.vao = gl.createVertexArray();
     gl.bindVertexArray(this.vao);
@@ -929,12 +1014,82 @@ void main() {
     return this._chain;
   }
 
-  async _flood({ nx, ny, terrain, altLoss, pinI, pinJ, altMSL, iterations }) {
+  async bakeTerrain({ tiles, tileX0, tileY0, tileCountX, tileCountY, tileSize, nx, ny, pinLat, pinLng, cellM, n, degPerMLat, degPerMLng, pow2z }) {
     const gl = this.gl;
+    const atlasW = tileCountX * tileSize;
+    const atlasH = tileCountY * tileSize;
     this.canvas.width = nx;
     this.canvas.height = ny;
 
-    const terrainTex = this._makeTex(nx, ny, terrain);
+    // Atlas texture: composited terrarium-encoded tiles. RGBA8 storage.
+    const atlasTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, atlasTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, atlasW, atlasH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    for (const { tileX, tileY, data } of tiles) {
+      if (!data) continue;
+      gl.texSubImage2D(
+        gl.TEXTURE_2D, 0,
+        (tileX - tileX0) * tileSize,
+        (tileY - tileY0) * tileSize,
+        gl.RGBA, gl.UNSIGNED_BYTE, data,
+      );
+    }
+
+    const terrainTex = this._makeTex(nx, ny, null);
+
+    gl.useProgram(this.bakeProg);
+    gl.bindVertexArray(this.vao);
+    gl.uniform1i(this.uBake.atlas, 0);
+    gl.uniform2f(this.uBake.atlasSize, atlasW, atlasH);
+    gl.uniform2f(this.uBake.atlasOriginPx, tileX0 * tileSize, tileY0 * tileSize);
+    gl.uniform2f(this.uBake.pinLL, pinLng, pinLat);
+    gl.uniform2f(this.uBake.degPerM, degPerMLng, degPerMLat);
+    gl.uniform1f(this.uBake.cellM, cellM);
+    gl.uniform1f(this.uBake.n, n);
+    gl.uniform2f(this.uBake.gridSize, nx, ny);
+    gl.uniform1f(this.uBake.pow2z, pow2z);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, atlasTex);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, terrainTex, 0);
+    gl.viewport(0, 0, nx, ny);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // Readback terrain — CPU still needs it for rasterising AGL and hover.
+    const pbo = gl.createBuffer();
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo);
+    gl.bufferData(gl.PIXEL_PACK_BUFFER, nx * ny * 4, gl.STREAM_READ);
+    gl.readPixels(0, 0, nx, ny, gl.RED, gl.FLOAT, 0);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+
+    const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    gl.flush();
+    try {
+      await this._waitFence(fence);
+    } finally {
+      gl.deleteSync(fence);
+    }
+
+    const terrainArr = new Float32Array(nx * ny);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo);
+    gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, terrainArr);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    gl.deleteBuffer(pbo);
+    gl.deleteTexture(atlasTex);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    return { terrainTex, terrainArr };
+  }
+
+  async _flood({ nx, ny, terrainTex, altLoss, pinI, pinJ, altMSL, iterations }) {
+    const gl = this.gl;
+    this.canvas.width = nx;
+    this.canvas.height = ny;
 
     const altInit = new Float32Array(nx * ny);
     altInit.fill(-1e9);
