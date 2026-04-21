@@ -21,8 +21,33 @@ const map = new maplibregl.Map({
           '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> ' +
           '© <a href="https://carto.com/attributions">CARTO</a>',
       },
+      terrain: {
+        type: 'raster-dem',
+        tiles: [
+          'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png',
+        ],
+        encoding: 'terrarium',
+        tileSize: 256,
+        maxzoom: 15,
+        attribution:
+          'Terrain © <a href="https://registry.opendata.aws/terrain-tiles/">AWS Terrain Tiles</a>',
+      },
     },
-    layers: [{ id: 'basemap', type: 'raster', source: 'basemap' }],
+    layers: [
+      { id: 'basemap', type: 'raster', source: 'basemap' },
+      {
+        id: 'hillshade',
+        type: 'hillshade',
+        source: 'terrain',
+        paint: {
+          'hillshade-exaggeration': 0.55,
+          'hillshade-shadow-color': '#4a3e28',
+          'hillshade-highlight-color': '#ffffff',
+          'hillshade-accent-color': '#000000',
+          'hillshade-illumination-direction': 335,
+        },
+      },
+    ],
   },
   center: [-122.0306, 47.5133], // Poo Poo Point LZ, Tiger Mountain
   zoom: 13,
