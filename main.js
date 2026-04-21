@@ -82,6 +82,28 @@ function aglAt(lngLat) {
   return agl >= 0 ? agl : null;
 }
 
+// Rolling queue of in-flight blob URLs. MapLibre fetches URLs asynchronously,
+// so we can't revoke immediately after updateImage — keep the two most recent
+// alive until a third arrives.
+const rasterUrlQueue = [];
+
+async function updateRasterSource(imageData, coordinates) {
+  const canvas = document.createElement('canvas');
+  canvas.width = imageData.width;
+  canvas.height = imageData.height;
+  canvas.getContext('2d').putImageData(imageData, 0, 0);
+  const blob = await new Promise((resolve) =>
+    canvas.toBlob(resolve, 'image/png'),
+  );
+  if (!blob) return;
+  const url = URL.createObjectURL(blob);
+  map.getSource('glide-raster').updateImage({ url, coordinates });
+  rasterUrlQueue.push(url);
+  while (rasterUrlQueue.length > 2) {
+    URL.revokeObjectURL(rasterUrlQueue.shift());
+  }
+}
+
 function handleMapClick(e) {
   const agl = aglAt(e.lngLat);
   if (agl != null) {
@@ -128,7 +150,7 @@ map.on('load', () => {
   // colours come from the RdYlGn LUT. Bilinear resampling keeps it smooth at
   // zoom-in.
   const PLACEHOLDER_PNG =
-    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgAAIAAAUAAarVyFEAAAAASUVORK5CYII=';
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
   map.addSource('glide-raster', {
     type: 'image',
     url: PLACEHOLDER_PNG,
@@ -459,10 +481,8 @@ async function compute() {
   }
   if (myToken !== computeToken) return;
   map.getSource('glide').setData(primary.geojson);
-  map.getSource('glide-raster').updateImage({
-    data: primary.raster.image,
-    coordinates: primary.raster.coordinates,
-  });
+  await updateRasterSource(primary.raster.image, primary.raster.coordinates);
+  if (myToken !== computeToken) return;
   lastCompute = {
     field: primary.field,
     nx: primary.nx,
