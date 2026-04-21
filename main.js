@@ -191,8 +191,19 @@ function boundsAround(lat, lng, radiusM) {
 
 const CELL_M = 100;                 // grid cell size (m)
 const MAX_RANGE_M = 150_000;        // hard cap on search radius
-const NEIGHBOR_DX = [-1, 1, 0, 0, -1, 1, -1, 1];
-const NEIGHBOR_DY = [0, 0, -1, 1, -1, -1, 1, 1];
+// 16-connected template: 8 king moves + 8 knight-like moves. The knight moves
+// add directions at ~26.6° and ~63.4°, which cuts the octagonal anisotropy of
+// an 8-only grid from ~8% worst-case to ~2% (the reachable set approaches a
+// smooth circle in flat terrain).
+const NEIGHBOR_DX = [
+  -1, 1,  0,  0, -1,  1, -1, 1,
+  -2, 2, -2,  2, -1,  1, -1, 1,
+];
+const NEIGHBOR_DY = [
+   0, 0, -1,  1, -1, -1,  1, 1,
+  -1, -1, 1,  1, -2, -2,  2, 2,
+];
+const N_NEIGHBORS = 16;
 
 function setStatus(msg) {
   document.getElementById('status').textContent = msg;
@@ -288,9 +299,9 @@ async function compute() {
 
   // Precompute per-neighbour altitude loss. Movement is FROM neighbour TO self,
   // so the edge direction is (−dx, −dy) in (east, north) cell units.
-  const altLoss = new Float32Array(8);
+  const altLoss = new Float32Array(N_NEIGHBORS);
   const BIG = 1e9;
-  for (let k = 0; k < 8; k++) {
+  for (let k = 0; k < N_NEIGHBORS; k++) {
     const dE = -NEIGHBOR_DX[k] * CELL_M;
     const dN = -NEIGHBOR_DY[k] * CELL_M;
     const dist = Math.sqrt(dE * dE + dN * dN);
@@ -491,22 +502,26 @@ precision highp float;
 uniform highp sampler2D u_alt;
 uniform highp sampler2D u_terrain;
 uniform vec2 u_texel;
-uniform float u_loss[8];
+uniform float u_loss[16];
 in vec2 v_uv;
 out vec4 outColor;
 
-const vec2 OFFS[8] = vec2[](
-  vec2(-1.0, 0.0), vec2(1.0, 0.0),
-  vec2(0.0, -1.0), vec2(0.0, 1.0),
-  vec2(-1.0, -1.0), vec2(1.0, -1.0),
-  vec2(-1.0, 1.0), vec2(1.0, 1.0)
+const vec2 OFFS[16] = vec2[](
+  vec2(-1.0,  0.0), vec2( 1.0,  0.0),
+  vec2( 0.0, -1.0), vec2( 0.0,  1.0),
+  vec2(-1.0, -1.0), vec2( 1.0, -1.0),
+  vec2(-1.0,  1.0), vec2( 1.0,  1.0),
+  vec2(-2.0, -1.0), vec2( 2.0, -1.0),
+  vec2(-2.0,  1.0), vec2( 2.0,  1.0),
+  vec2(-1.0, -2.0), vec2( 1.0, -2.0),
+  vec2(-1.0,  2.0), vec2( 1.0,  2.0)
 );
 
 void main() {
   float self = texture(u_alt, v_uv).r;
   float terrain = texture(u_terrain, v_uv).r;
   float best = self;
-  for (int k = 0; k < 8; k++) {
+  for (int k = 0; k < 16; k++) {
     float loss = u_loss[k];
     if (loss > 1e8) continue;
     float nAlt = texture(u_alt, v_uv + OFFS[k] * u_texel).r;
