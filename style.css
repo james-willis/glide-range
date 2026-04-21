@@ -59,7 +59,8 @@ body {
   display: flex;
   gap: 4px;
 }
-.input-row input { flex: 1; min-width: 0; }
+.input-row input { flex: 1 1 auto; min-width: 0; width: auto; }
+.input-row select { flex: 0 0 auto; width: auto; }
 
 .row {
   display: flex;

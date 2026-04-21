@@ -680,14 +680,6 @@ function refreshHeightSlider() {
     slider.value = String(clamped);
     if (clamped !== v) number.value = String(clamped);
   }
-  const hint = document.getElementById('heightHint');
-  if (lastBaseElevM != null) {
-    const f = unit === 'ft' ? slider.min : `${slider.min} m`;
-    hint.textContent =
-      unit === 'ft'
-        ? `Slider: ${slider.min} – ${MAX_ALT_FT} ft (pin terrain → 18 k ft).`
-        : `Slider: ${slider.min} – ${slider.max} m (pin terrain → 18 k ft).`;
-  }
 }
 
 document.getElementById('heightSlider').addEventListener('input', (e) => {
