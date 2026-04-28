@@ -1,5 +1,10 @@
 // glide-range: terrain + wind-aware paraglider reach estimator
 
+// Toggle to swap the GPU compute backend. WebGPU branch is experimental — the
+// map renderer (MapLibre GL) is still WebGL2 either way; this only affects the
+// flood-fill / terrain-bake compute path.
+const USE_WEBGPU = true;
+
 // --- map setup --------------------------------------------------------------
 
 const map = new maplibregl.Map({
@@ -646,7 +651,9 @@ async function runFlood(ctx, cellM) {
     altLoss[k] = (dist * V) / (GR * G);
   }
 
-  if (!flooder) flooder = new GpuFlooder();
+  if (!flooder) {
+    flooder = USE_WEBGPU ? await GpuFlooderWebGPU.create() : new GpuFlooder();
+  }
 
   const t0 = performance.now();
   const { terrainTex, terrainArr } = await flooder.bakeTerrain({
@@ -1252,5 +1259,379 @@ void main() {
       };
       check();
     });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GpuFlooderWebGPU — same public API as GpuFlooder, implemented with WebGPU
+// compute shaders instead of fragment-shader-as-compute. Conceptual map:
+//
+//   WebGL                              WebGPU
+//   -----                              ------
+//   fragment shader on a fullscreen    @compute shader, dispatched directly
+//     quad writing to an FBO           into a workgroup grid
+//   R32F texture                       array<f32> storage buffer
+//   uniform location set per draw      uniform/storage bind groups
+//   gl.readPixels + fenceSync poll     buffer.mapAsync(GPUMapMode.READ)
+//   ANY_SAMPLES_PASSED occlusion query atomic<u32> counter (not used in v1)
+//
+// The atlas (terrarium-encoded RGB tiles) is the one place a real texture is
+// still natural — we sample it once per cell during the bake. Everything else
+// is a flat Float32 buffer.
+// ---------------------------------------------------------------------------
+
+const BAKE_WGSL = /* wgsl */ `
+struct BakeParams {
+  atlas_size: vec2<f32>,
+  atlas_origin_px: vec2<f32>,
+  pin_ll: vec2<f32>,        // (lng, lat)
+  deg_per_m: vec2<f32>,     // (degPerMLng, degPerMLat)
+  cell_m: f32,
+  n: f32,
+  grid_size: vec2<f32>,     // (nx, ny)
+  pow2z: f32,
+  _pad0: f32,
+  _pad1: f32,
+  _pad2: f32,
+};
+
+@group(0) @binding(0) var atlas: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> p: BakeParams;
+@group(0) @binding(2) var<storage, read_write> terrain: array<f32>;
+
+const TILE_SIZE: f32 = 256.0;
+const DEG2RAD: f32 = 0.01745329;
+const PI: f32 = 3.14159265;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let nx = u32(p.grid_size.x);
+  let ny = u32(p.grid_size.y);
+  if (gid.x >= nx || gid.y >= ny) { return; }
+
+  let i = f32(gid.x);
+  let j = f32(gid.y);
+  let dE = (i - p.n) * p.cell_m;
+  let dN = (j - p.n) * p.cell_m;
+  let lat = p.pin_ll.y + dN * p.deg_per_m.y;
+  let lng = p.pin_ll.x + dE * p.deg_per_m.x;
+
+  // Global terrarium pixel coords (z = TILE_ZOOM).
+  let gx = ((lng + 180.0) / 360.0) * p.pow2z * TILE_SIZE;
+  let lat_rad = lat * DEG2RAD;
+  let tile_y = (1.0 - log(tan(lat_rad) + 1.0 / cos(lat_rad)) / PI) * 0.5 * p.pow2z;
+  let gy = tile_y * TILE_SIZE;
+
+  let atlas_px = vec2<f32>(gx, gy) - p.atlas_origin_px;
+
+  var elev: f32;
+  if (atlas_px.x < 0.0 || atlas_px.x >= p.atlas_size.x ||
+      atlas_px.y < 0.0 || atlas_px.y >= p.atlas_size.y) {
+    elev = 99999.0;  // off-atlas = impassable wall
+  } else {
+    // textureLoad takes integer pixel coords; no sampler, no derivatives —
+    // exactly what a compute shader can express.
+    let texel = textureLoad(atlas, vec2<i32>(atlas_px), 0);
+    let r = texel.r * 255.0;
+    let g = texel.g * 255.0;
+    let b = texel.b * 255.0;
+    elev = r * 256.0 + g + b / 256.0 - 32768.0;
+  }
+  terrain[gid.y * nx + gid.x] = elev;
+}
+`;
+
+const FLOOD_WGSL = /* wgsl */ `
+// 16 loss values, packed as 4 vec4s (uniform arrays of scalars have a 16-byte
+// stride in WGSL — packing into vec4 keeps it tight).
+@group(0) @binding(0) var<uniform> loss_packed: array<vec4<f32>, 4>;
+@group(0) @binding(1) var<uniform> dims: vec4<u32>;     // (nx, ny, _, _)
+@group(0) @binding(2) var<storage, read> terrain: array<f32>;
+
+@group(1) @binding(0) var<storage, read> alt_in: array<f32>;
+@group(1) @binding(1) var<storage, read_write> alt_out: array<f32>;
+
+const BIG: f32 = 1e8;
+
+const OFFS: array<vec2<i32>, 16> = array<vec2<i32>, 16>(
+  vec2<i32>(-1,  0), vec2<i32>( 1,  0),
+  vec2<i32>( 0, -1), vec2<i32>( 0,  1),
+  vec2<i32>(-1, -1), vec2<i32>( 1, -1),
+  vec2<i32>(-1,  1), vec2<i32>( 1,  1),
+  vec2<i32>(-2, -1), vec2<i32>( 2, -1),
+  vec2<i32>(-2,  1), vec2<i32>( 2,  1),
+  vec2<i32>(-1, -2), vec2<i32>( 1, -2),
+  vec2<i32>(-1,  2), vec2<i32>( 1,  2)
+);
+
+fn loss_at(k: u32) -> f32 {
+  return loss_packed[k / 4u][k % 4u];
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let nx = dims.x;
+  let ny = dims.y;
+  if (gid.x >= nx || gid.y >= ny) { return; }
+
+  let i = i32(gid.x);
+  let j = i32(gid.y);
+  let self_idx = gid.y * nx + gid.x;
+  let self_alt = alt_in[self_idx];
+  let terr = terrain[self_idx];
+  var best = self_alt;
+
+  for (var k: u32 = 0u; k < 16u; k = k + 1u) {
+    let l = loss_at(k);
+    if (l > BIG) { continue; }
+    let off = OFFS[k];
+    let ni = i + off.x;
+    let nj = j + off.y;
+    // Explicit bounds check replaces WebGL's CLAMP_TO_EDGE; cleaner semantics.
+    if (ni < 0 || ni >= i32(nx) || nj < 0 || nj >= i32(ny)) { continue; }
+    let n_alt = alt_in[u32(nj) * nx + u32(ni)];
+    if (n_alt < -BIG) { continue; }
+    let arrival = n_alt - l;
+    if (arrival > terr && arrival > best) { best = arrival; }
+  }
+
+  // Compute can't "discard" like a fragment shader, so always write. The
+  // ping-pong source already has the previous value, so unchanged cells are
+  // re-written with the same value — equivalent outcome.
+  alt_out[self_idx] = best;
+}
+`;
+
+class GpuFlooderWebGPU {
+  // WebGPU init is async (adapter request + device request) — use a factory.
+  static async create() {
+    if (!navigator.gpu) {
+      throw new Error('WebGPU not available in this browser');
+    }
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) throw new Error('No WebGPU adapter found');
+    const device = await adapter.requestDevice();
+    return new GpuFlooderWebGPU(device);
+  }
+
+  constructor(device) {
+    this.device = device;
+
+    const bakeModule = device.createShaderModule({ code: BAKE_WGSL });
+    this.bakePipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: bakeModule, entryPoint: 'main' },
+    });
+
+    const floodModule = device.createShaderModule({ code: FLOOD_WGSL });
+    this.floodPipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: floodModule, entryPoint: 'main' },
+    });
+
+    // Serializes overlapping flood() calls, mirroring the WebGL class.
+    this._chain = Promise.resolve();
+  }
+
+  flood(opts) {
+    const prev = this._chain;
+    this._chain = (async () => {
+      await prev.catch(() => {});
+      return this._flood(opts);
+    })();
+    return this._chain;
+  }
+
+  // Returns { terrainTex, terrainArr } where terrainTex is a GPUBuffer (kept
+  // the field name for symmetry with the WebGL backend so the caller doesn't
+  // need to branch). The buffer is consumed and freed by flood().
+  async bakeTerrain({ tiles, tileX0, tileY0, tileCountX, tileCountY, tileSize, nx, ny, pinLat, pinLng, cellM, n, degPerMLat, degPerMLng, pow2z }) {
+    const device = this.device;
+    const atlasW = tileCountX * tileSize;
+    const atlasH = tileCountY * tileSize;
+
+    // Atlas texture. COPY_DST so we can upload tile data, TEXTURE_BINDING so
+    // the shader can read it.
+    const atlas = device.createTexture({
+      size: { width: atlasW, height: atlasH },
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    for (const { tileX, tileY, data } of tiles) {
+      if (!data) continue;
+      // ImageData has Uint8ClampedArray; writeTexture takes raw bytes.
+      device.queue.writeTexture(
+        { texture: atlas, origin: { x: (tileX - tileX0) * tileSize, y: (tileY - tileY0) * tileSize } },
+        data.data,
+        { bytesPerRow: tileSize * 4, rowsPerImage: tileSize },
+        { width: tileSize, height: tileSize },
+      );
+    }
+
+    // Uniform buffer for bake params (64 bytes — see WGSL struct layout).
+    const paramsBuf = device.createBuffer({
+      size: 64,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    const params = new Float32Array(16);
+    params[0] = atlasW; params[1] = atlasH;
+    params[2] = tileX0 * tileSize; params[3] = tileY0 * tileSize;
+    params[4] = pinLng; params[5] = pinLat;
+    params[6] = degPerMLng; params[7] = degPerMLat;
+    params[8] = cellM; params[9] = n;
+    params[10] = nx; params[11] = ny;
+    params[12] = pow2z;
+    device.queue.writeBuffer(paramsBuf, 0, params);
+
+    // Output terrain buffer. STORAGE for the bake shader to write, COPY_SRC
+    // so we can stage it out for CPU readback.
+    const terrainBuf = device.createBuffer({
+      size: nx * ny * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+
+    const bindGroup = device.createBindGroup({
+      layout: this.bakePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: atlas.createView() },
+        { binding: 1, resource: { buffer: paramsBuf } },
+        { binding: 2, resource: { buffer: terrainBuf } },
+      ],
+    });
+
+    // CPU-readable buffer to stage the terrain back. MAP_READ + COPY_DST is
+    // the only valid combo for a buffer you intend to mapAsync on.
+    const readback = device.createBuffer({
+      size: nx * ny * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(this.bakePipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.ceil(nx / 8), Math.ceil(ny / 8));
+    pass.end();
+    enc.copyBufferToBuffer(terrainBuf, 0, readback, 0, nx * ny * 4);
+    device.queue.submit([enc.finish()]);
+
+    await readback.mapAsync(GPUMapMode.READ);
+    const terrainArr = new Float32Array(readback.getMappedRange().slice(0));
+    readback.unmap();
+    readback.destroy();
+    atlas.destroy();
+    paramsBuf.destroy();
+
+    // terrainBuf lives on for the flood() call.
+    return { terrainTex: terrainBuf, terrainArr };
+  }
+
+  async _flood({ nx, ny, terrainTex, altLoss, pinI, pinJ, altMSL, iterations }) {
+    const device = this.device;
+    const cells = nx * ny;
+    const terrainBuf = terrainTex; // alias for clarity (it's a GPUBuffer here)
+
+    // Two altitude buffers for ping-pong. Initialised on the host: -1e9
+    // everywhere, altMSL at the pin cell.
+    const altInit = new Float32Array(cells);
+    altInit.fill(-1e9);
+    altInit[pinJ * nx + pinI] = altMSL;
+    const bufA = device.createBuffer({
+      size: cells * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    const bufB = device.createBuffer({
+      size: cells * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(bufA, 0, altInit);
+    // bufB starts as a copy of bufA so unchanged cells in iter 0 already hold
+    // the right value when alt_out is written.
+    device.queue.writeBuffer(bufB, 0, altInit);
+
+    // Loss vector: 16 floats, padded into 4 vec4s = 64 bytes.
+    const lossPacked = new Float32Array(16);
+    lossPacked.set(altLoss);
+    const lossBuf = device.createBuffer({
+      size: 64,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(lossBuf, 0, lossPacked);
+
+    // Dims uniform: (nx, ny, 0, 0) as u32.
+    const dimsBuf = device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(dimsBuf, 0, new Uint32Array([nx, ny, 0, 0]));
+
+    const constsGroup = device.createBindGroup({
+      layout: this.floodPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: lossBuf } },
+        { binding: 1, resource: { buffer: dimsBuf } },
+        { binding: 2, resource: { buffer: terrainBuf } },
+      ],
+    });
+
+    // Two ping-pong bind groups, swapped each iteration. Same layout, just
+    // different buffers playing the read / read_write roles.
+    const groupAB = device.createBindGroup({
+      layout: this.floodPipeline.getBindGroupLayout(1),
+      entries: [
+        { binding: 0, resource: { buffer: bufA } },
+        { binding: 1, resource: { buffer: bufB } },
+      ],
+    });
+    const groupBA = device.createBindGroup({
+      layout: this.floodPipeline.getBindGroupLayout(1),
+      entries: [
+        { binding: 0, resource: { buffer: bufB } },
+        { binding: 1, resource: { buffer: bufA } },
+      ],
+    });
+
+    // Encode all iterations into a single command buffer. WebGPU happily
+    // handles thousands of dispatches per submit; the GPU executes them
+    // back-to-back without any host round-trip.
+    const wgX = Math.ceil(nx / 8);
+    const wgY = Math.ceil(ny / 8);
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(this.floodPipeline);
+    pass.setBindGroup(0, constsGroup);
+    for (let i = 0; i < iterations; i++) {
+      pass.setBindGroup(1, i % 2 === 0 ? groupAB : groupBA);
+      pass.dispatchWorkgroups(wgX, wgY);
+    }
+    pass.end();
+
+    // Final result lives in whichever buffer was written last.
+    const finalBuf = iterations % 2 === 1 ? bufB : bufA;
+    const readback = device.createBuffer({
+      size: cells * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    enc.copyBufferToBuffer(finalBuf, 0, readback, 0, cells * 4);
+    device.queue.submit([enc.finish()]);
+
+    await readback.mapAsync(GPUMapMode.READ);
+    const out = new Float32Array(readback.getMappedRange().slice(0));
+    readback.unmap();
+    readback.destroy();
+
+    bufA.destroy();
+    bufB.destroy();
+    lossBuf.destroy();
+    dimsBuf.destroy();
+    terrainBuf.destroy();
+
+    // Note: no early-exit on convergence. The WebGL version uses an occlusion
+    // query to break out when no cell changed; that requires per-iteration
+    // host syncing. WebGPU compute can do it via an atomic counter +
+    // periodic mapAsync, but that means stalling the pipeline. Skipped for
+    // v1 — the iteration count is bounded (~1.8n + 20) and the GPU work per
+    // iteration is tiny, so running them all is fine.
+    return { result: out, actualIters: iterations };
   }
 }
