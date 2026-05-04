@@ -132,10 +132,37 @@ function setPin(lngLat) {
   pinMarker.on('dragend', () => {
     pinLngLat = pinMarker.getLngLat();
     refreshPinReadout();
-    scheduleCompute(0);
+    snapAltitudeToTerrain();
   });
   pinLngLat = pinMarker.getLngLat();
   refreshPinReadout();
+  snapAltitudeToTerrain();
+}
+
+// When the pin moves, ensure the altitude input is at least at terrain level.
+// Also seeds lastBaseElevM so the slider's lower bound updates immediately,
+// before compute() runs.
+async function snapAltitudeToTerrain() {
+  if (!pinLngLat) return;
+  const { lat, lng } = pinLngLat;
+  await preloadTilesForBounds(boundsAround(lat, lng, 500));
+  const elev = elevationAt(lat, lng);
+  if (elev != null) {
+    lastBaseElevM = elev;
+    const unit = document.getElementById('heightUnit').value;
+    const altInput = document.getElementById('height');
+    const slider = document.getElementById('heightSlider');
+    const currentMSL =
+      (parseFloat(altInput.value) || 0) * (unit === 'ft' ? 0.3048 : 1);
+    if (currentMSL < elev) {
+      const elevCeil = Math.ceil(elev);
+      const display = unit === 'ft' ? Math.ceil(elevCeil / 0.3048) : elevCeil;
+      altInput.value = String(display);
+      slider.value = String(display);
+      scheduleUrlWrite();
+    }
+    refreshHeightSlider();
+  }
   scheduleCompute(0);
 }
 
