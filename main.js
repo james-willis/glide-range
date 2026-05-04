@@ -175,6 +175,27 @@ map.on('load', () => {
     },
   }, beforeId);
 
+  // Satellite imagery (Esri World Imagery). Sits above the Positron base
+  // layers so it covers them when active, but below the AGL raster and labels.
+  // Initially hidden — toggled by the "Base map" select.
+  map.addSource('satellite', {
+    type: 'raster',
+    tiles: [
+      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    ],
+    tileSize: 256,
+    maxzoom: 19,
+    attribution:
+      'Imagery © <a href="https://www.esri.com/">Esri</a>, Maxar, Earthstar Geographics',
+  });
+  map.addLayer({
+    id: 'satellite',
+    type: 'raster',
+    source: 'satellite',
+    layout: { visibility: 'none' },
+    paint: { 'raster-fade-duration': 0 },
+  }, beforeId);
+
   // Continuous AGL colouring via a raster image. One pixel per grid cell;
   // colours come from the RdYlGn LUT. Bilinear resampling keeps it smooth at
   // zoom-in.
@@ -264,6 +285,22 @@ map.on('load', () => {
   }
 
   applyUrlState();
+  applyBasemap(document.getElementById('basemap').value);
+});
+
+function applyBasemap(value) {
+  const isSat = value === 'satellite';
+  if (map.getLayer('satellite')) {
+    map.setLayoutProperty('satellite', 'visibility', isSat ? 'visible' : 'none');
+  }
+  if (map.getLayer('hillshade')) {
+    map.setLayoutProperty('hillshade', 'visibility', isSat ? 'none' : 'visible');
+  }
+}
+
+document.getElementById('basemap').addEventListener('change', () => {
+  applyBasemap(document.getElementById('basemap').value);
+  scheduleUrlWrite();
 });
 
 // Persist map pan/zoom in the URL too, after any user-initiated move.
@@ -455,6 +492,7 @@ function writeUrl() {
   parts.push(`as=${document.getElementById('airspeed').value}`);
   parts.push(`ws=${document.getElementById('windSpeed').value}`);
   parts.push(`wd=${document.getElementById('windDir').value}`);
+  parts.push(`bm=${document.getElementById('basemap').value}`);
   const c = map.getCenter();
   parts.push(`c=${c.lat.toFixed(4)},${c.lng.toFixed(4)}`);
   parts.push(`z=${map.getZoom().toFixed(2)}`);
@@ -486,6 +524,7 @@ function applyUrlState() {
   setIfValid('airspeed', s.as);
   setIfValid('windSpeed', s.ws);
   setIfValid('windDir', s.wd);
+  setIfValid('basemap', s.bm);
 
   // Nudge the compass arrow to match wd.
   if (s.wd !== undefined) {
