@@ -155,7 +155,22 @@ body.sidebar-hidden #sidebar-toggle { left: 10px; }
 #map {
   flex: 1;
   height: 100vh;
+  position: relative;
 }
+
+#tile-progress {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 2px;
+  width: 0%;
+  background: #0a7e8c;
+  opacity: 0;
+  transition: width 0.15s ease, opacity 0.3s ease;
+  pointer-events: none;
+  z-index: 5;
+}
+#tile-progress.active { opacity: 1; }
 
 .hover-readout {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
