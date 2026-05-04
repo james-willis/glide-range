@@ -378,6 +378,7 @@ function fetchTile(x, y, z) {
   if (tileData.has(key)) return Promise.resolve(tileData.get(key));
   if (tilePromises.has(key)) return tilePromises.get(key);
 
+  tileProgressBumpTotal();
   const p = new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
@@ -389,13 +390,56 @@ function fetchTile(x, y, z) {
       ctx.drawImage(img, 0, 0);
       const data = ctx.getImageData(0, 0, TILE_SIZE, TILE_SIZE);
       tileData.set(key, data);
+      tileProgressBumpDone();
       resolve(data);
     };
-    img.onerror = () => reject(new Error(`tile ${key} failed`));
+    img.onerror = () => {
+      tileProgressBumpDone();
+      reject(new Error(`tile ${key} failed`));
+    };
     img.src = TERRAIN_URL(x, y, z);
   });
   tilePromises.set(key, p);
   return p;
+}
+
+// --- tile progress bar ----------------------------------------------------
+
+let tilesTotal = 0;
+let tilesDone = 0;
+let tileProgressResetTimer = null;
+
+function tileProgressBumpTotal() {
+  tilesTotal++;
+  updateTileProgress();
+}
+
+function tileProgressBumpDone() {
+  tilesDone++;
+  updateTileProgress();
+  if (tilesDone >= tilesTotal) {
+    clearTimeout(tileProgressResetTimer);
+    tileProgressResetTimer = setTimeout(() => {
+      if (tilesDone >= tilesTotal) {
+        tilesTotal = 0;
+        tilesDone = 0;
+        updateTileProgress();
+      }
+    }, 350);
+  }
+}
+
+function updateTileProgress() {
+  const bar = document.getElementById('tile-progress');
+  if (!bar) return;
+  if (tilesTotal === 0) {
+    bar.classList.remove('active');
+    bar.style.width = '0%';
+    return;
+  }
+  const pct = Math.min(100, (tilesDone / tilesTotal) * 100);
+  bar.classList.add('active');
+  bar.style.width = pct + '%';
 }
 
 async function preloadTilesForBounds(bounds) {
